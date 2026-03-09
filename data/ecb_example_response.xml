@@ -36,7 +36,7 @@
         <generic:Value id="TIME_FORMAT" value="P1D" />
         <generic:Value id="DECIMALS" value="4" />
         <generic:Value id="COLLECTION" value="A" />
-        <generic:Value id="TITLE" value="US dollar/Euro" />
+        <generic:Value id="TITLE" value="US dollar/Euro ECB reference exchange rate" />
       </generic:Attributes>
       <generic:Obs>
         <generic:ObsDimension value="2023-07-13" />
