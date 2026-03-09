@@ -96,10 +96,14 @@ pub fn verify_transactions<T>(
     verification
 }
 
-/// Trade date is when transaction was trigerred.
-/// fees and commission are applied at the moment of settlement date so
-/// we ignore those and use net income rather than principal
-/// Actual Tax is to be paid from settlement_date
+/// Trade date is when transaction was triggered.
+/// Fees and commission are applied at the moment of settlement date so
+/// we ignore those and use net income rather than principal.
+/// Per Art. 11a para. 1 of the Polish Personal Income Tax Act (ustawa o podatku
+/// dochodowym od osob fizycznych), income in foreign currencies shall be converted
+/// to PLN using the average NBP exchange rate from the last working day preceding
+/// the date of income receipt. For stock sales the date of income receipt is the
+/// trade date (transaction date), NOT the settlement date.
 pub fn reconstruct_sold_transactions(
     sold_transactions: &Vec<(String, String, f32, f32, f32, Option<String>)>,
     gains_and_losses: &Vec<(String, String, f32, f32, f32)>,
@@ -257,8 +261,8 @@ pub fn create_detailed_div_transactions(
 //    pub acquisition_date: String,
 //    pub income_us: f32,
 //    pub cost_basis: f32,
-//    pub exchange_rate_settlement_date: String,
-//    pub exchange_rate_settlement: f32,
+//    pub exchange_rate_trade_date: String,
+//    pub exchange_rate_trade: f32,
 //    pub exchange_rate_acquisition_date: String,
 //    pub exchange_rate_acquisition: f32,
 pub fn create_detailed_sold_transactions(
@@ -268,8 +272,11 @@ pub fn create_detailed_sold_transactions(
     let mut detailed_transactions: Vec<SoldTransaction> = Vec::new();
     transactions.iter().for_each(
         |(trade_date, settlement_date, acquisition_date, income, cost_basis, symbol)| {
-            let (exchange_rate_settlement_date, exchange_rate_settlement) = dates
-                [&crate::Exchange::USD(settlement_date.clone())]
+            // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
+            // converted using the NBP rate from the last working day preceding the
+            // trade date (transaction date), NOT the settlement date.
+            let (exchange_rate_trade_date, exchange_rate_trade) = dates
+                [&crate::Exchange::USD(trade_date.clone())]
                 .clone()
                 .unwrap();
             let (exchange_rate_acquisition_date, exchange_rate_acquisition) = dates
@@ -278,13 +285,13 @@ pub fn create_detailed_sold_transactions(
                 .unwrap();
 
             let transaction = SoldTransaction {
-                settlement_date: settlement_date.clone(),
                 trade_date: trade_date.clone(),
+                settlement_date: settlement_date.clone(),
                 acquisition_date: acquisition_date.clone(),
                 income_us: *income,
                 cost_basis: *cost_basis,
-                exchange_rate_settlement_date,
-                exchange_rate_settlement,
+                exchange_rate_trade_date,
+                exchange_rate_trade,
                 exchange_rate_acquisition_date,
                 exchange_rate_acquisition,
                 company: symbol.clone(),
@@ -314,8 +321,12 @@ pub fn create_detailed_revolut_sold_transactions(
     let mut detailed_transactions: Vec<SoldTransaction> = Vec::new();
     transactions.iter().for_each(
         |(acquired_date, sold_date, cost_basis, gross_income, symbol)| {
-            let (exchange_rate_settlement_date, exchange_rate_settlement) = dates
-                [&gross_income.derive_exchange(sold_date.clone())] // TODO: settlement date???
+            // For Revolut transactions sold_date is the transaction date.
+            // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
+            // converted using the NBP rate from the last working day preceding the
+            // transaction date.
+            let (exchange_rate_trade_date, exchange_rate_trade) = dates
+                [&gross_income.derive_exchange(sold_date.clone())]
                 .clone()
                 .unwrap();
             let (exchange_rate_acquisition_date, exchange_rate_acquisition) = dates
@@ -324,13 +335,13 @@ pub fn create_detailed_revolut_sold_transactions(
                 .unwrap();
 
             let transaction = SoldTransaction {
-                settlement_date: sold_date.clone(),
                 trade_date: sold_date.clone(),
+                settlement_date: sold_date.clone(),
                 acquisition_date: acquired_date.clone(),
                 income_us: (gross_income.value() as f32),
                 cost_basis: (cost_basis.value() as f32),
-                exchange_rate_settlement_date,
-                exchange_rate_settlement,
+                exchange_rate_trade_date,
+                exchange_rate_trade,
                 exchange_rate_acquisition_date,
                 exchange_rate_acquisition,
                 company: symbol.clone(),
@@ -379,7 +390,7 @@ pub(crate) fn create_per_company_report(
         let entry = per_company_data
             .entry(x.company.clone())
             .or_insert((0.0, 0.0, 0.0));
-        entry.0 += x.income_us * x.exchange_rate_settlement;
+        entry.0 += x.income_us * x.exchange_rate_trade;
         // No tax from sold transactions
         entry.2 += x.cost_basis * x.exchange_rate_acquisition;
     });
@@ -546,8 +557,8 @@ mod tests {
                 acquisition_date: "01/01/21".to_string(),
                 income_us: 20.0,
                 cost_basis: 20.0,
-                exchange_rate_settlement_date: "03/02/21".to_string(),
-                exchange_rate_settlement: 2.5,
+                exchange_rate_trade_date: "02/28/21".to_string(),
+                exchange_rate_trade: 2.5,
                 exchange_rate_acquisition_date: "02/28/21".to_string(),
                 exchange_rate_acquisition: 5.0,
                 company: Some("INTEL CORP".to_owned()),
@@ -558,8 +569,8 @@ mod tests {
                 acquisition_date: "01/01/19".to_string(),
                 income_us: 25.0,
                 cost_basis: 10.0,
-                exchange_rate_settlement_date: "06/05/21".to_string(),
-                exchange_rate_settlement: 4.0,
+                exchange_rate_trade_date: "05/31/21".to_string(),
+                exchange_rate_trade: 4.0,
                 exchange_rate_acquisition_date: "12/30/18".to_string(),
                 exchange_rate_acquisition: 6.0,
                 company: Some("INTEL CORP".to_owned()),
@@ -570,8 +581,8 @@ mod tests {
                 acquisition_date: "01/01/19".to_string(),
                 income_us: 20.0,
                 cost_basis: 0.0,
-                exchange_rate_settlement_date: "06/05/21".to_string(),
-                exchange_rate_settlement: 4.0,
+                exchange_rate_trade_date: "05/31/21".to_string(),
+                exchange_rate_trade: 4.0,
                 exchange_rate_acquisition_date: "12/30/18".to_string(),
                 exchange_rate_acquisition: 6.0,
                 company: Some("PXD".to_owned()),
@@ -935,8 +946,8 @@ mod tests {
                 acquisition_date: "11/20/23".to_string(),
                 income_us: 5804.62,
                 cost_basis: 5000.0,
-                exchange_rate_settlement_date: "12/06/24".to_string(),
-                exchange_rate_settlement: 3.0,
+                exchange_rate_trade_date: "12/06/24".to_string(),
+                exchange_rate_trade: 3.0,
                 exchange_rate_acquisition_date: "11/19/23".to_string(),
                 exchange_rate_acquisition: 2.0,
                 company: Some("INTEL CORP".to_owned()),
@@ -1013,8 +1024,8 @@ mod tests {
                     acquisition_date: "01/01/21".to_string(),
                     income_us: 20.0,
                     cost_basis: 20.0,
-                    exchange_rate_settlement_date: "03/02/21".to_string(),
-                    exchange_rate_settlement: 2.5,
+                    exchange_rate_trade_date: "02/28/21".to_string(),
+                    exchange_rate_trade: 2.0,
                     exchange_rate_acquisition_date: "02/28/21".to_string(),
                     exchange_rate_acquisition: 5.0,
                     company: Some("INTEL CORP".to_owned()),
@@ -1025,8 +1036,8 @@ mod tests {
                     acquisition_date: "01/01/19".to_string(),
                     income_us: 25.0,
                     cost_basis: 10.0,
-                    exchange_rate_settlement_date: "06/05/21".to_string(),
-                    exchange_rate_settlement: 4.0,
+                    exchange_rate_trade_date: "06/03/21".to_string(),
+                    exchange_rate_trade: 3.0,
                     exchange_rate_acquisition_date: "12/30/18".to_string(),
                     exchange_rate_acquisition: 6.0,
                     company: Some("INTEL CORP".to_owned()),

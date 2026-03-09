@@ -100,19 +100,26 @@ impl Transaction {
     }
 }
 
-// 1. settlement date
-// 2. date of purchase
-// 3. net income
-// 4. cost cost basis
+// 1. trade date (transaction date)
+// 2. settlement date
+// 3. date of purchase
+// 4. net income
+// 5. cost basis
+//
+// Per Art. 11a para. 1 of the Polish Personal Income Tax Act (ustawa o podatku
+// dochodowym od osob fizycznych), income in foreign currencies shall be converted
+// to PLN using the average NBP exchange rate from the last working day preceding
+// the date of income receipt. For stock sales the date of income receipt is the
+// trade date (transaction date), NOT the settlement date.
 #[derive(Debug, PartialEq, PartialOrd)]
 pub struct SoldTransaction {
-    pub settlement_date: String,
     pub trade_date: String,
+    pub settlement_date: String,
     pub acquisition_date: String,
     pub income_us: f32,
     pub cost_basis: f32,
-    pub exchange_rate_settlement_date: String,
-    pub exchange_rate_settlement: f32,
+    pub exchange_rate_trade_date: String,
+    pub exchange_rate_trade: f32,
     pub exchange_rate_acquisition_date: String,
     pub exchange_rate_acquisition: f32,
     pub company: Option<String>,
@@ -123,11 +130,11 @@ pub struct SoldTransaction {
 impl SoldTransaction {
     pub fn format_to_print(&self, prefix: &str) -> String {
         format!(
-                "{prefix} SOLD TRANSACTION trade_date: {}, settlement_date: {}, acquisition_date: {}, net_income: ${},  cost_basis: {}, exchange_rate_settlement: {} , exchange_rate_settlement_date: {}, exchange_rate_acquisition: {} , exchange_rate_acquisition_date: {}",
+                "{prefix} SOLD TRANSACTION trade_date: {}, settlement_date: {}, acquisition_date: {}, net_income: ${},  cost_basis: {}, exchange_rate_trade: {} , exchange_rate_trade_date: {}, exchange_rate_acquisition: {} , exchange_rate_acquisition_date: {}",
                 chrono::NaiveDate::parse_from_str(&self.trade_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
                 chrono::NaiveDate::parse_from_str(&self.settlement_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
                 chrono::NaiveDate::parse_from_str(&self.acquisition_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
-                &self.income_us, &self.cost_basis, &self.exchange_rate_settlement, &self.exchange_rate_settlement_date, &self.exchange_rate_acquisition, &self.exchange_rate_acquisition_date,
+                &self.income_us, &self.cost_basis, &self.exchange_rate_trade, &self.exchange_rate_trade_date, &self.exchange_rate_acquisition, &self.exchange_rate_acquisition_date,
             )
             .to_owned()
     }
@@ -303,9 +310,12 @@ fn compute_div_taxation(transactions: &Vec<Transaction>) -> (f32, f32) {
 
 fn compute_sold_taxation(transactions: &Vec<SoldTransaction>) -> (f32, f32) {
     // Net income from sold stock in target currency (PLN, EUR etc.)
+    // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
+    // converted using the NBP rate from the last working day preceding the
+    // trade date (transaction date), NOT the settlement date.
     let gross_us_pl: f32 = transactions
         .iter()
-        .map(|x| x.exchange_rate_settlement * x.income_us)
+        .map(|x| x.exchange_rate_trade * x.income_us)
         .sum();
     // Cost of income e.g. cost_basis[target currency]
     let cost_us_pl: f32 = transactions
@@ -460,12 +470,10 @@ pub fn run_taxation(
             }
         });
     detailed_sold_transactions.iter().for_each(
-        |(trade_date, settlement_date, acquisition_date, _, _, _)| {
+        |(trade_date, _settlement_date, acquisition_date, _, _, _)| {
+            // Exchange rate for income uses trade date (per Art. 11a para. 1 of
+            // the Polish Personal Income Tax Act). Settlement date is not needed.
             let ex = Exchange::USD(trade_date.clone());
-            if dates.contains_key(&ex) == false {
-                dates.insert(ex, None);
-            }
-            let ex = Exchange::USD(settlement_date.clone());
             if dates.contains_key(&ex) == false {
                 dates.insert(ex, None);
             }
@@ -706,8 +714,8 @@ mod tests {
             acquisition_date: "N/A".to_string(),
             income_us: 100.0,
             cost_basis: 70.0,
-            exchange_rate_settlement_date: "N/A".to_string(),
-            exchange_rate_settlement: 5.0,
+            exchange_rate_trade_date: "N/A".to_string(),
+            exchange_rate_trade: 5.0,
             exchange_rate_acquisition_date: "N/A".to_string(),
             exchange_rate_acquisition: 6.0,
             company: Some("TFC".to_owned()),
@@ -729,8 +737,8 @@ mod tests {
                 acquisition_date: "N/A".to_string(),
                 income_us: 100.0,
                 cost_basis: 70.0,
-                exchange_rate_settlement_date: "N/A".to_string(),
-                exchange_rate_settlement: 5.0,
+                exchange_rate_trade_date: "N/A".to_string(),
+                exchange_rate_trade: 5.0,
                 exchange_rate_acquisition_date: "N/A".to_string(),
                 exchange_rate_acquisition: 6.0,
                 company: Some("PXD".to_owned()),
@@ -741,8 +749,8 @@ mod tests {
                 acquisition_date: "N/A".to_string(),
                 income_us: 10.0,
                 cost_basis: 4.0,
-                exchange_rate_settlement_date: "N/A".to_string(),
-                exchange_rate_settlement: 2.0,
+                exchange_rate_trade_date: "N/A".to_string(),
+                exchange_rate_trade: 2.0,
                 exchange_rate_acquisition_date: "N/A".to_string(),
                 exchange_rate_acquisition: 3.0,
                 company: Some("TFC".to_owned()),
