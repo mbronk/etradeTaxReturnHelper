@@ -99,11 +99,13 @@ pub fn verify_transactions<T>(
 /// Trade date is when transaction was triggered.
 /// Fees and commission are applied at the moment of settlement date so
 /// we ignore those and use net income rather than principal.
-/// Per Art. 11a para. 1 of the Polish Personal Income Tax Act (ustawa o podatku
-/// dochodowym od osob fizycznych), income in foreign currencies shall be converted
-/// to PLN using the average NBP exchange rate from the last working day preceding
-/// the date of income receipt. For stock sales the date of income receipt is the
-/// trade date (transaction date), NOT the settlement date.
+///
+/// Art. 11a ust. 1 ustawy z dnia 26 lipca 1991 r. o podatku dochodowym od osob
+/// fizycznych (Dz.U. 2024 poz. 226) requires conversion to PLN at the average
+/// NBP rate from the last working day preceding the day income is received.
+/// Under Art. 17 ust. 1 pkt 6 lit. a of the same Act, securities-sale income
+/// is "nalezne" (due) at the trade date (when the trade is executed), not at the
+/// settlement date (T+2). Therefore the NBP rate keyed to the TRADE DATE is used.
 pub fn reconstruct_sold_transactions(
     sold_transactions: &Vec<(String, String, f32, f32, f32, Option<String>)>,
     gains_and_losses: &Vec<(String, String, f32, f32, f32)>,
@@ -272,9 +274,8 @@ pub fn create_detailed_sold_transactions(
     let mut detailed_transactions: Vec<SoldTransaction> = Vec::new();
     transactions.iter().for_each(
         |(trade_date, settlement_date, acquisition_date, income, cost_basis, symbol)| {
-            // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
-            // converted using the NBP rate from the last working day preceding the
-            // trade date (transaction date), NOT the settlement date.
+            // Art. 11a ust. 1 + Art. 17 ust. 1 pkt 6 lit. a of the Polish PIT Act:
+            // use the NBP rate preceding the TRADE DATE, not the settlement date.
             let (exchange_rate_trade_date, exchange_rate_trade) = dates
                 [&crate::Exchange::USD(trade_date.clone())]
                 .clone()
@@ -322,9 +323,8 @@ pub fn create_detailed_revolut_sold_transactions(
     transactions.iter().for_each(
         |(acquired_date, sold_date, cost_basis, gross_income, symbol)| {
             // For Revolut transactions sold_date is the transaction date.
-            // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
-            // converted using the NBP rate from the last working day preceding the
-            // transaction date.
+            // Art. 11a ust. 1 + Art. 17 ust. 1 pkt 6 lit. a of the Polish PIT Act:
+            // use the NBP rate preceding the transaction date (trade date).
             let (exchange_rate_trade_date, exchange_rate_trade) = dates
                 [&gross_income.derive_exchange(sold_date.clone())]
                 .clone()

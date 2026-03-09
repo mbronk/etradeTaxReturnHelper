@@ -106,11 +106,18 @@ impl Transaction {
 // 4. net income
 // 5. cost basis
 //
-// Per Art. 11a para. 1 of the Polish Personal Income Tax Act (ustawa o podatku
-// dochodowym od osob fizycznych), income in foreign currencies shall be converted
-// to PLN using the average NBP exchange rate from the last working day preceding
-// the date of income receipt. For stock sales the date of income receipt is the
-// trade date (transaction date), NOT the settlement date.
+// Art. 11a ust. 1 ustawy z dnia 26 lipca 1991 r. o podatku dochodowym od osob
+// fizycznych (Dz.U. 2024 poz. 226, consolidated text) requires that income in
+// foreign currencies be converted to PLN at the average NBP exchange rate
+// published for the last working day PRECEDING the day income is received.
+//
+// Art. 17 ust. 1 pkt 6 lit. a of the same Act classifies income from securities
+// sales as "nalezne, chocby nie zostaly faktycznie otrzymane" (due even if not
+// yet actually received in cash), meaning recognition occurs when the trade is
+// executed, not when cash settles two working days later (T+2).
+//
+// Therefore the NBP rate for the last working day before the TRADE DATE must be
+// used, NOT the settlement date.
 #[derive(Debug, PartialEq, PartialOrd)]
 pub struct SoldTransaction {
     pub trade_date: String,
@@ -310,9 +317,9 @@ fn compute_div_taxation(transactions: &Vec<Transaction>) -> (f32, f32) {
 
 fn compute_sold_taxation(transactions: &Vec<SoldTransaction>) -> (f32, f32) {
     // Net income from sold stock in target currency (PLN, EUR etc.)
-    // Per Art. 11a para. 1 of the Polish Personal Income Tax Act, income is
-    // converted using the NBP rate from the last working day preceding the
-    // trade date (transaction date), NOT the settlement date.
+    // Art. 11a ust. 1 and Art. 17 ust. 1 pkt 6 lit. a of the Polish PIT Act
+    // require conversion at the NBP rate preceding the trade date, not the
+    // settlement date.
     let gross_us_pl: f32 = transactions
         .iter()
         .map(|x| x.exchange_rate_trade * x.income_us)
@@ -471,8 +478,8 @@ pub fn run_taxation(
         });
     detailed_sold_transactions.iter().for_each(
         |(trade_date, _settlement_date, acquisition_date, _, _, _)| {
-            // Exchange rate for income uses trade date (per Art. 11a para. 1 of
-            // the Polish Personal Income Tax Act). Settlement date is not needed.
+            // Art. 11a ust. 1 + Art. 17 ust. 1 pkt 6 lit. a of the Polish PIT Act:
+            // income is recognised at the trade date; settlement date is not needed.
             let ex = Exchange::USD(trade_date.clone());
             if dates.contains_key(&ex) == false {
                 dates.insert(ex, None);
