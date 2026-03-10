@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use chrono::Datelike;
+use rust_decimal::Decimal;
+use rust_decimal::dec;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 pub struct PL {}
 
@@ -59,7 +62,7 @@ fn is_non_working_day(date: &chrono::NaiveDate) -> Result<bool, String> {
 // Iterate through dates and find where value is None
 // and then try to get for that specific date from cache
 fn get_exchange_rates_from_cache(
-    dates: &mut std::collections::HashMap<etradeTaxReturnHelper::Exchange, Option<(String, f32)>>,
+    dates: &mut std::collections::HashMap<etradeTaxReturnHelper::Exchange, Option<(String, Decimal)>>,
 ) -> Result<bool, String> {
     let mut all_filled = true;
     dates.iter_mut().try_for_each(|(exchange, val)| {
@@ -73,7 +76,7 @@ fn get_exchange_rates_from_cache(
             etradeTaxReturnHelper::Exchange::USD(date) => ("usd", date),
             etradeTaxReturnHelper::Exchange::EUR(date) => ("eur", date),
             etradeTaxReturnHelper::Exchange::PLN(_) => {
-                *val = Some(("N/A".to_owned(), 1.0));
+                *val = Some(("N/A".to_owned(), Decimal::ONE));
                 return Ok::<(), String>(());
             } // For PLN to PLN follow fast path
         };
@@ -120,7 +123,7 @@ fn get_exchange_rates_from_cache(
                 exchange_rate_date,
                 exchange_rate
             );
-            *val = Some((exchange_rate_date, *exchange_rate as f32));
+            *val = Some((exchange_rate_date, Decimal::from_str(&exchange_rate.to_string()).unwrap()));
         } else {
             log::info!(
                 "Not Found cached exchange rate. Date:{} ",
@@ -139,7 +142,7 @@ impl etradeTaxReturnHelper::Residency for PL {
         &self,
         dates: &mut std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         >,
     ) -> Result<(), String> {
         // Try to get exchange rates from cached data (output from program gen_exchange_rates)
@@ -187,7 +190,7 @@ impl etradeTaxReturnHelper::Residency for PL {
                 etradeTaxReturnHelper::Exchange::USD(date) => ("usd", date),
                 etradeTaxReturnHelper::Exchange::EUR(date) => ("eur", date),
                 etradeTaxReturnHelper::Exchange::PLN(_) => {
-                    *val = Some(("N/A".to_owned(), 1.0));
+                    *val = Some(("N/A".to_owned(), Decimal::ONE));
                     return Ok::<(), String>(());
                 } // For PLN to PLN follow fast path
             };
@@ -222,7 +225,7 @@ impl etradeTaxReturnHelper::Residency for PL {
                     log::info!("body of exchange_rate = {:#?}", nbp_response);
                     let exchange_rate = nbp_response.rates[0].mid;
                     let exchange_rate_date = format!("{}", converted_date.format("%Y-%m-%d"));
-                    *val = Some((exchange_rate_date, exchange_rate));
+                    *val = Some((exchange_rate_date, Decimal::from_str(&exchange_rate.to_string()).unwrap()));
                 };
             }
             Ok::<(), String>(())
@@ -232,13 +235,13 @@ impl etradeTaxReturnHelper::Residency for PL {
 
     fn present_result(
         &self,
-        gross_div: f32,
-        tax_div: f32,
-        gross_sold: f32,
-        cost_sold: f32,
+        gross_div: Decimal,
+        tax_div: Decimal,
+        gross_sold: Decimal,
+        cost_sold: Decimal,
     ) -> (Vec<String>, Option<String>) {
         let mut presentation: Vec<String> = vec![];
-        let tax_pl = 0.19 * gross_div;
+        let tax_pl = dec!(0.19) * gross_div;
         presentation.push(format!(
             "(DYWIDENDY) PRZYCHOD Z ZAGRANICY: {:.2} PLN",
             gross_div
@@ -270,14 +273,15 @@ impl etradeTaxReturnHelper::Residency for PL {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::dec;
     #[test]
     fn test_present_result_pl() -> Result<(), String> {
         let rd: Box<dyn etradeTaxReturnHelper::Residency> = Box::new(PL {});
 
-        let gross_div = 100.0f32;
-        let tax_div = 15.0f32;
-        let gross_sold = 1000.0f32;
-        let cost_sold = 10.0f32;
+        let gross_div = dec!(100.0);
+        let tax_div = dec!(15.0);
+        let gross_sold = dec!(1000.0);
+        let cost_sold = dec!(10.0);
 
         let ref_results: Vec<String> = vec![
             "(DYWIDENDY) PRZYCHOD Z ZAGRANICY: 100.00 PLN".to_string(),
@@ -301,7 +305,7 @@ mod tests {
     fn test_get_exchange_rates_pl() -> Result<(), String> {
         let mut dates: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
         dates.insert(
             etradeTaxReturnHelper::Exchange::PLN("07/14/81".to_owned()),
@@ -321,19 +325,19 @@ mod tests {
 
         let mut expected_result: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
         expected_result.insert(
             etradeTaxReturnHelper::Exchange::PLN("07/14/81".to_owned()),
-            Some(("N/A".to_owned(), 1.0)),
+            Some(("N/A".to_owned(), Decimal::ONE)),
         );
         expected_result.insert(
             etradeTaxReturnHelper::Exchange::PLN("08/14/81".to_owned()),
-            Some(("N/A".to_owned(), 1.0)),
+            Some(("N/A".to_owned(), Decimal::ONE)),
         );
         expected_result.insert(
             etradeTaxReturnHelper::Exchange::PLN("09/14/81".to_owned()),
-            Some(("N/A".to_owned(), 1.0)),
+            Some(("N/A".to_owned(), Decimal::ONE)),
         );
 
         assert_eq!(dates, expected_result);
@@ -345,10 +349,10 @@ mod tests {
     fn test_present_result_double_taxation_warning_pl() -> Result<(), String> {
         let rd: Box<dyn etradeTaxReturnHelper::Residency> = Box::new(PL {});
 
-        let gross_div = 100.0f32;
-        let tax_div = 30.0f32;
-        let gross_sold = 1000.0f32;
-        let cost_sold = 10.0f32;
+        let gross_div = dec!(100.0);
+        let tax_div = dec!(30.0);
+        let gross_sold = dec!(1000.0);
+        let cost_sold = dec!(10.0);
 
         let ref_results: Vec<String> = vec![
             "(DYWIDENDY) PRZYCHOD Z ZAGRANICY: 100.00 PLN".to_string(),
@@ -365,7 +369,7 @@ mod tests {
             .zip(&ref_results)
             .for_each(|(a, b)| assert_eq!(a, b));
 
-        let ref_msg = "Warning: Tax paid in US(30 PLN) is higher than the tax that you are to pay in Poland(19 PLN). This either means that there was a problem with declaration of your residency to avoid double taxation or you are having income from countries that are having higher tax at source than the one used in Poland(19%)".to_string();
+        let ref_msg = "Warning: Tax paid in US(30.0 PLN) is higher than the tax that you are to pay in Poland(19.000 PLN). This either means that there was a problem with declaration of your residency to avoid double taxation or you are having income from countries that are having higher tax at source than the one used in Poland(19%)".to_string();
 
         match warning {
             Some(msg) => assert_eq!(msg, ref_msg),
@@ -397,18 +401,18 @@ mod tests {
             ),
             (
                 etradeTaxReturnHelper::Exchange::EUR("02/23/24".to_owned()),
-                Some(("2024-02-21".to_string(), 3.994)),
+                Some(("2024-02-21".to_string(), dec!(3.994))),
             ),
         ]);
 
         let expected_rates = std::collections::HashMap::from([
             (
                 etradeTaxReturnHelper::Exchange::USD("02/26/24".to_owned()),
-                Some(("2024-02-23".to_string(), 4.005)),
+                Some(("2024-02-23".to_string(), dec!(4.005))),
             ),
             (
                 etradeTaxReturnHelper::Exchange::EUR("02/23/24".to_owned()),
-                Some(("2024-02-21".to_string(), 3.994)),
+                Some(("2024-02-21".to_string(), dec!(3.994))),
             ),
         ]);
 
@@ -424,7 +428,7 @@ mod tests {
             ),
             (
                 etradeTaxReturnHelper::Exchange::EUR("02/23/00".to_owned()),
-                Some(("2020-02-21".to_string(), 3.994)),
+                Some(("2020-02-21".to_string(), dec!(3.994))),
             ),
         ]);
 
@@ -446,11 +450,11 @@ mod tests {
         let expected_rates = std::collections::HashMap::from([
             (
                 etradeTaxReturnHelper::Exchange::EUR("02/10/23".to_owned()),
-                Some(("2023-02-09".to_string(), 4.7363)),
+                Some(("2023-02-09".to_string(), dec!(4.7363))),
             ),
             (
                 etradeTaxReturnHelper::Exchange::EUR("09/25/23".to_owned()),
-                Some(("2023-09-22".to_string(), 4.6069)),
+                Some(("2023-09-22".to_string(), dec!(4.6069))),
             ),
         ]);
 

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use regex::Regex;
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 pub struct DE {}
 
@@ -10,13 +12,13 @@ impl etradeTaxReturnHelper::Residency for DE {
         &self,
         dates: &mut std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         >,
     ) -> Result<(), String> {
         self.get_currency_exchange_rates(dates, "EUR")
     }
 
-    fn parse_exchange_rates(&self, body: &str) -> Result<(f32, String), String> {
+    fn parse_exchange_rates(&self, body: &str) -> Result<(Decimal, String), String> {
         // to find examplery "1 US Dollar = 0.82831 Euros on 2/26/2021</td>"
         let pattern = "1 USD</span> =";
         let start_offset = body
@@ -27,8 +29,8 @@ impl etradeTaxReturnHelper::Residency for DE {
         log::info!("Exchange rate slice:  {}", pattern_slice);
         let re = Regex::new(r"[0-9]+[.][0-9]+").unwrap();
 
-        let exchange_rate: f32 = match re.find(pattern_slice) {
-            Some(hit) => hit.as_str().parse::<f32>().unwrap(),
+        let exchange_rate: Decimal = match re.find(pattern_slice) {
+            Some(hit) => Decimal::from_str(hit.as_str()).unwrap(),
             None => panic!(),
         };
 
@@ -57,10 +59,10 @@ impl etradeTaxReturnHelper::Residency for DE {
 
     fn present_result(
         &self,
-        gross_div: f32,
-        tax_div: f32,
-        gross_sold: f32,
-        cost_sold: f32,
+        gross_div: Decimal,
+        tax_div: Decimal,
+        gross_sold: Decimal,
+        cost_sold: Decimal,
     ) -> (Vec<String>, Option<String>) {
         let mut presentation: Vec<String> = vec![];
         presentation.push(format!("===> (DIVIDENDS) INCOME: {:.2} EUR", gross_div));
@@ -78,15 +80,16 @@ impl etradeTaxReturnHelper::Residency for DE {
 mod tests {
     use super::*;
     use etradeTaxReturnHelper::Residency;
+    use rust_decimal::dec;
 
     #[test]
     fn test_present_result_de() -> Result<(), String> {
         let rd: Box<dyn etradeTaxReturnHelper::Residency> = Box::new(DE {});
 
-        let gross_div = 100.0f32;
-        let tax_div = 15.0f32;
-        let gross_sold = 1000.0f32;
-        let cost_sold = 10.0f32;
+        let gross_div = dec!(100.0);
+        let tax_div = dec!(15.0);
+        let gross_sold = dec!(1000.0);
+        let cost_sold = dec!(10.0);
 
         let ref_results: Vec<String> = vec![
             "===> (DIVIDENDS) INCOME: 100.00 EUR".to_string(),
@@ -109,7 +112,7 @@ mod tests {
     fn test_get_exchange_rates_eur() -> Result<(), String> {
         let mut dates: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
         dates.insert(
             etradeTaxReturnHelper::Exchange::USD("07/14/23".to_owned()),
@@ -119,16 +122,11 @@ mod tests {
         let rd: DE = DE {};
         rd.get_currency_exchange_rates(&mut dates,"EUR").map_err(|x| "Error: unable to get exchange rates.  Please check your internet connection or proxy settings\n\nDetails:".to_string()+x.as_str())?;
 
-        let mut expected_result: std::collections::HashMap<
-            etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
-        > = std::collections::HashMap::new();
-        expected_result.insert(
-            etradeTaxReturnHelper::Exchange::USD("07/14/23".to_owned()),
-            Some(("2023-07-13".to_owned(), 0.89429444)),
-        );
-
-        assert_eq!(dates, expected_result);
+        let (date, rate) = dates[&etradeTaxReturnHelper::Exchange::USD("07/14/23".to_owned())]
+            .clone()
+            .unwrap();
+        assert_eq!(date, "2023-07-13");
+        assert_eq!(rate, dec!(0.8942944017170452512967268825));
 
         Ok(())
     }

@@ -11,6 +11,7 @@ use std::str::FromStr;
 use lopdf::content::Content;
 use lopdf::{Dictionary as LoDictionary, Document as LoDocument, Object as LoObject, ObjectId};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 pub use crate::logging::ResultExt;
 
@@ -42,7 +43,7 @@ enum ParserState {
 
 pub trait Entry {
     fn parse(&mut self, pstr: &pdf::primitive::PdfString);
-    fn getf32(&self) -> Option<f32> {
+    fn get_decimal(&self) -> Option<Decimal> {
         None
     }
     fn geti32(&self) -> Option<i32> {
@@ -61,28 +62,28 @@ pub trait Entry {
     }
 }
 
-struct F32Entry {
-    pub val: f32,
+struct DecimalEntry {
+    pub val: Decimal,
 }
 
-impl Entry for F32Entry {
+impl Entry for DecimalEntry {
     fn parse(&mut self, pstr: &pdf::primitive::PdfString) {
         let mystr = pstr
             .clone()
             .into_string()
-            .expect(&format!("Error parsing : {:#?} to f32", pstr));
+            .expect(&format!("Error parsing : {:#?} to Decimal", pstr));
         // Extracted string should have "," removed and then be parsed
-        self.val = mystr
+        let cleaned = mystr
             .trim()
             .replace(",", "")
             .replace("(", "")
             .replace(")", "")
-            .replace("$", "")
-            .parse::<f32>()
-            .expect(&format!("Error parsing : {} to f32", mystr));
-        log::info!("Parsed f32 value: {}", self.val);
+            .replace("$", "");
+        self.val = Decimal::from_str(&cleaned)
+            .expect(&format!("Error parsing : {} to Decimal", mystr));
+        log::info!("Parsed Decimal value: {}", self.val);
     }
-    fn getf32(&self) -> Option<f32> {
+    fn get_decimal(&self) -> Option<Decimal> {
         Some(self.val)
     }
 }
@@ -156,8 +157,8 @@ fn create_dividend_parsing_sequence(sequence: &mut std::collections::VecDeque<Bo
         val: String::new(),
         patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
     })); // INTC, DLB
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Tax Entry
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Income Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Tax Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Income Entry
 }
 
 fn create_tax_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dyn Entry>>) {
@@ -169,7 +170,7 @@ fn create_tax_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dyn
             "ADVANCED MICRO DEVICES".to_owned(),
         ],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Tax Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Tax Entry
 }
 
 fn create_tax_withholding_adjusted_parsing_sequence(
@@ -186,7 +187,7 @@ fn create_tax_withholding_adjusted_parsing_sequence(
         patterns: vec![],
     }));
     // Money returned to tax-payer
-    sequence.push_back(Box::new(F32Entry { val: 0.0 }));
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO }));
 }
 
 fn create_interests_fund_parsing_sequence(
@@ -203,7 +204,7 @@ fn create_interests_fund_parsing_sequence(
             "Transaction Reportable for the Prior Year.".to_owned(),
         ],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Income Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Income Entry
 }
 
 fn create_interest_adjustment_parsing_sequence(
@@ -221,7 +222,7 @@ fn create_interest_adjustment_parsing_sequence(
         val: String::new(),
         patterns: vec![],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Income Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Income Entry
 }
 
 fn create_qualified_dividend_parsing_sequence(
@@ -231,7 +232,7 @@ fn create_qualified_dividend_parsing_sequence(
         val: String::new(),
         patterns: vec!["INTEL CORP".to_owned()],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Income Entry
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Income Entry
 }
 
 fn create_sold_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dyn Entry>>) {
@@ -239,9 +240,9 @@ fn create_sold_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dy
         val: String::new(),
         patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
     })); // INTC, DLB
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Quantity
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Price
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Amount Sold
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Quantity
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Price
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Amount Sold
 }
 
 fn create_sold_2_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dyn Entry>>) {
@@ -257,9 +258,9 @@ fn create_sold_2_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<
         val: String::new(),
         patterns: vec!["UNSOLICITED TRADE".to_owned()],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Quantity
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Price
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Amount Sold
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Quantity
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Price
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Amount Sold
 }
 
 fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
@@ -281,12 +282,12 @@ fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
         val: String::new(),
         patterns: vec!["SELL".to_owned(), "BUY".to_owned()],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Quantity
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Quantity
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["$".to_owned()],
     })); // $...
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<price>
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // ..<price>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["PRINCIPAL".to_owned()],
@@ -295,7 +296,7 @@ fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
         val: String::new(),
         patterns: vec!["$".to_owned()],
     }));
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<principal>
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // ..<principal>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["COMMISSION".to_owned()],
@@ -304,7 +305,7 @@ fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
         val: String::new(),
         patterns: vec!["$".to_owned()],
     })); // $...
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<commission>
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // ..<commission>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["FEE".to_owned(), "FEES".to_owned()],
@@ -313,7 +314,7 @@ fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
         val: String::new(),
         patterns: vec!["$".to_owned()],
     })); // $...
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<fee>
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // ..<fee>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["NET".to_owned()],
@@ -326,7 +327,7 @@ fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
         val: String::new(),
         patterns: vec!["$".to_owned()],
     })); // $...
-    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<net amount>
+    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // ..<net amount>
 }
 
 fn yield_trade_confirmation_transaction(
@@ -352,54 +353,51 @@ fn yield_trade_confirmation_transaction(
     let quantity = transaction
         .next()
         .unwrap()
-        .getf32()
+        .get_decimal()
         .ok_or("Error parsing trade confirmation: missing quantity")?
-        .round() as i32;
+        .round()
+        .to_i32()
+        .ok_or("Error converting quantity to i32")?;
 
     transaction.next(); // $
-    let price = Decimal::from_f32_retain(transaction
+    let price = transaction
         .next()
         .unwrap()
-        .getf32()
-        .ok_or("Error parsing trade confirmation: missing price")?)
-        .ok_or("Error converting price to Decimal")?;
+        .get_decimal()
+        .ok_or("Error parsing trade confirmation: missing price")?;
 
     transaction.next(); // PRINCIPAL
     transaction.next(); // $
-    let principal = Decimal::from_f32_retain(transaction
+    let principal = transaction
         .next()
         .unwrap()
-        .getf32()
-        .ok_or("Error parsing trade confirmation: missing principal")?)
-        .ok_or("Error converting principal to Decimal")?;
+        .get_decimal()
+        .ok_or("Error parsing trade confirmation: missing principal")?;
 
     transaction.next(); // COMMISSION
     transaction.next(); // $
-    let commission = Decimal::from_f32_retain(transaction
+    let commission = transaction
         .next()
         .unwrap()
-        .getf32()
-        .ok_or("Error parsing trade confirmation: missing commission")?)
-        .ok_or("Error converting commission to Decimal")?;
+        .get_decimal()
+        .ok_or("Error parsing trade confirmation: missing commission")?;
 
     transaction.next(); // FEE / FEES
     transaction.next(); // $
-    let fee = Decimal::from_f32_retain(transaction
+    let fee = transaction
         .next()
         .unwrap()
-        .getf32()
-        .ok_or("Error parsing trade confirmation: missing fee")?)
-        .ok_or("Error converting fee to Decimal")?;
+        .get_decimal()
+        .ok_or("Error parsing trade confirmation: missing fee")?;
 
     transaction.next(); // NET
     transaction.next(); // AMOUNT
     transaction.next(); // $
-    let net_amount = Decimal::from_f32_retain(transaction
+    let net_amount = transaction
         .next()
         .unwrap()
-        .getf32()
-        .ok_or("Error parsing trade confirmation: missing net amount")?)
-        .ok_or("Error converting net amount to Decimal")?;
+        .get_decimal()
+        .ok_or("Error parsing trade confirmation: missing net amount")?;
 
     Ok((
         trade_date,
@@ -785,9 +783,9 @@ fn parse_trade_confirmation_lopdf(
     seen_multi_transaction_page_hashes: &mut HashSet<u64>,
 ) -> Result<
     (
-        Vec<(String, f32, f32)>,
-        Vec<(String, f32, f32, Option<String>)>,
-        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, Decimal, Decimal)>,
+        Vec<(String, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -857,9 +855,9 @@ fn parse_trade_confirmation<'a, I>(
     pages_iter: I,
 ) -> Result<
     (
-        Vec<(String, f32, f32)>,
-        Vec<(String, f32, f32, Option<String>)>,
-        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, Decimal, Decimal)>,
+        Vec<(String, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -867,9 +865,9 @@ fn parse_trade_confirmation<'a, I>(
 where
     I: Iterator<Item = Result<PageRc, pdf::error::PdfError>>,
 {
-    let interests_transactions: Vec<(String, f32, f32)> = vec![];
-    let div_transactions: Vec<(String, f32, f32, Option<String>)> = vec![];
-    let sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
+    let interests_transactions: Vec<(String, Decimal, Decimal)> = vec![];
+    let div_transactions: Vec<(String, Decimal, Decimal, Option<String>)> = vec![];
+    let sold_transactions: Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)> = vec![];
     let mut trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
 
     let full_date_pattern = regex::Regex::new(r"^(0?[1-9]|1[012])/(0?[1-9]|[12][0-9]|3[01])/\\d{2}$")
@@ -1001,7 +999,7 @@ where
 fn yield_sold_transaction(
     transaction: &mut std::slice::Iter<'_, Box<dyn Entry>>,
     transaction_dates: &mut Vec<String>,
-) -> Option<(String, String, f32, f32, f32, Option<String>)> {
+) -> Option<(String, String, Decimal, Decimal, Decimal, Option<String>)> {
     let symbol = transaction
         .next()
         .unwrap()
@@ -1010,17 +1008,17 @@ fn yield_sold_transaction(
     let quantity = transaction
         .next()
         .unwrap()
-        .getf32()
+        .get_decimal()
         .expect_and_log("Processing of Sold transaction went wrong");
     let price = transaction
         .next()
         .unwrap()
-        .getf32()
+        .get_decimal()
         .expect_and_log("Processing of Sold transaction went wrong");
     let amount_sold = transaction
         .next()
         .unwrap()
-        .getf32()
+        .get_decimal()
         .expect_and_log("Parsing of Sold transaction went wrong");
     // Last transaction date is settlement date
     // next to last is trade date
@@ -1175,9 +1173,9 @@ fn recognize_statement(page: PageRc, pdftoparse: &str) -> Result<StatementType, 
 }
 
 fn process_transaction(
-    interests_transactions: &mut Vec<(String, f32, f32)>,
-    div_transactions: &mut Vec<(String, f32, f32, Option<String>)>,
-    sold_transactions: &mut Vec<(String, String, f32, f32, f32, Option<String>)>,
+    interests_transactions: &mut Vec<(String, Decimal, Decimal)>,
+    div_transactions: &mut Vec<(String, Decimal, Decimal, Option<String>)>,
+    sold_transactions: &mut Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
     actual_string: &pdf::primitive::PdfString,
     transaction_dates: &mut Vec<String>,
     processed_sequence: &mut Vec<Box<dyn Entry>>,
@@ -1233,7 +1231,7 @@ fn process_transaction(
                         let tax_us = transaction
                             .next()
                             .unwrap()
-                            .getf32()
+                            .get_decimal()
                             .ok_or("Processing of Tax transaction went wrong")?;
 
                         // Here we just go through registered transactions and pick the one where
@@ -1241,14 +1239,14 @@ fn process_transaction(
                         // applied
                         let mut interests_as_div: Vec<(
                             &mut String,
-                            &mut f32,
-                            &mut f32,
+                            &mut Decimal,
+                            &mut Decimal,
                             Option<String>,
                         )> = interests_transactions
                             .iter_mut()
                             .map(|x| (&mut x.0, &mut x.1, &mut x.2, None))
                             .collect();
-                        let mut div_as_ref: Vec<(&mut String, &mut f32, &mut f32, Option<String>)> =
+                        let mut div_as_ref: Vec<(&mut String, &mut Decimal, &mut Decimal, Option<String>)> =
                             div_transactions
                                 .iter_mut()
                                 .map(|x| (&mut x.0, &mut x.1, &mut x.2, x.3.clone()))
@@ -1257,7 +1255,7 @@ fn process_transaction(
                         let subject_to_tax = div_as_ref
                             .iter_mut()
                             .chain(interests_as_div.iter_mut())
-                            .find(|x| *x.1 > tax_us && *x.2 == 0.0f32)
+                            .find(|x| *x.1 > tax_us && *x.2 == Decimal::ZERO)
                             .ok_or("Error: Unable to find transaction that was taxed")?;
                         log::info!("Tax: {tax_us} was applied to {subject_to_tax:?}");
                         *subject_to_tax.2 = tax_us;
@@ -1272,7 +1270,7 @@ fn process_transaction(
                         let gross_us = transaction
                             .next()
                             .unwrap()
-                            .getf32()
+                            .get_decimal()
                             .ok_or("Processing of Interests transaction went wrong")?;
 
                         interests_transactions.push((
@@ -1280,7 +1278,7 @@ fn process_transaction(
                                 .pop()
                                 .ok_or("Error: missing transaction dates when parsing")?,
                             gross_us,
-                            0.0, // No tax info yet. It may be added later in Tax section
+                            Decimal::ZERO, // No tax info yet. It may be added later in Tax section
                         ));
                         log::info!("Completed parsing Interests transaction");
                     }
@@ -1293,7 +1291,7 @@ fn process_transaction(
                         let gross_us = transaction
                             .next()
                             .unwrap()
-                            .getf32()
+                            .get_decimal()
                             .ok_or("Processing of Dividend transaction went wrong")?;
 
                         div_transactions.push((
@@ -1301,7 +1299,7 @@ fn process_transaction(
                                 .pop()
                                 .ok_or("Error: missing transaction dates when parsing")?,
                             gross_us,
-                            0.0, // No tax info yet. It will be added later in Tax section
+                            Decimal::ZERO, // No tax info yet. It will be added later in Tax section
                             Some(symbol),
                         ));
                         log::info!("Completed parsing Dividend transaction");
@@ -1401,9 +1399,9 @@ fn parse_account_statement<'a, I>(
     pages_iter: I,
 ) -> Result<
     (
-        Vec<(String, f32, f32)>,
-        Vec<(String, f32, f32, Option<String>)>,
-        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, Decimal, Decimal)>,
+        Vec<(String, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1411,9 +1409,9 @@ fn parse_account_statement<'a, I>(
 where
     I: Iterator<Item = Result<PageRc, pdf::error::PdfError>>,
 {
-    let mut interests_transactions: Vec<(String, f32, f32)> = vec![];
-    let mut div_transactions: Vec<(String, f32, f32, Option<String>)> = vec![];
-    let mut sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
+    let mut interests_transactions: Vec<(String, Decimal, Decimal)> = vec![];
+    let mut div_transactions: Vec<(String, Decimal, Decimal, Option<String>)> = vec![];
+    let mut sold_transactions: Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)> = vec![];
     let trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
     let mut state = ParserState::SearchingYear;
     let mut sequence: VecDeque<Box<dyn Entry>> = VecDeque::new();
@@ -1526,9 +1524,9 @@ pub(crate) fn parse_statement_with_seen_pages(
     seen_multi_transaction_page_hashes: &mut HashSet<u64>,
 ) -> Result<
     (
-        Vec<(String, f32, f32)>,
-        Vec<(String, f32, f32, Option<String>)>,
-        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, Decimal, Decimal)>,
+        Vec<(String, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1593,9 +1591,9 @@ pub fn parse_statement(
     pdftoparse: &str,
 ) -> Result<
     (
-        Vec<(String, f32, f32)>,
-        Vec<(String, f32, f32, Option<String>)>,
-        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, Decimal, Decimal)>,
+        Vec<(String, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1607,6 +1605,7 @@ pub fn parse_statement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::dec;
 
     #[test]
     fn test_parser() -> Result<(), String> {
@@ -1620,36 +1619,36 @@ mod tests {
         let data: Vec<u8> = vec![
             '2' as u8, '8' as u8, '.' as u8, '2' as u8, '0' as u8, '3' as u8, '5' as u8,
         ];
-        let mut f = F32Entry { val: 0.0 };
+        let mut f = DecimalEntry { val: Decimal::ZERO };
         f.parse(&pdf::primitive::PdfString::new(data));
-        assert_eq!(f.getf32(), Some(28.2035));
+        assert_eq!(f.get_decimal(), Some(dec!(28.2035)));
 
         // amount
         let data: Vec<u8> = vec![
             '4' as u8, ',' as u8, '8' as u8, '7' as u8, '7' as u8, '.' as u8, '3' as u8, '6' as u8,
         ];
-        let mut f = F32Entry { val: 0.0 };
+        let mut f = DecimalEntry { val: Decimal::ZERO };
         f.parse(&pdf::primitive::PdfString::new(data));
-        assert_eq!(f.getf32(), Some(4877.36));
+        assert_eq!(f.get_decimal(), Some(dec!(4877.36)));
 
         let data: Vec<u8> = vec![
             '(' as u8, '5' as u8, '7' as u8, '.' as u8, '9' as u8, '8' as u8, ')' as u8,
         ];
-        let mut f = F32Entry { val: 0.0 };
+        let mut f = DecimalEntry { val: Decimal::ZERO };
         f.parse(&pdf::primitive::PdfString::new(data));
-        assert_eq!(f.getf32(), Some(57.98));
+        assert_eq!(f.get_decimal(), Some(dec!(57.98)));
 
         let data: Vec<u8> = vec!['$' as u8, '1' as u8, '.' as u8, '2' as u8, '2' as u8];
-        let mut f = F32Entry { val: 0.0 };
+        let mut f = DecimalEntry { val: Decimal::ZERO };
         f.parse(&pdf::primitive::PdfString::new(data));
-        assert_eq!(f.getf32(), Some(1.22));
+        assert_eq!(f.get_decimal(), Some(dec!(1.22)));
 
         let data: Vec<u8> = vec![
             '8' as u8, '2' as u8, '.' as u8, '0' as u8, '0' as u8, '0' as u8,
         ];
-        let mut f = F32Entry { val: 0.0 };
+        let mut f = DecimalEntry { val: Decimal::ZERO };
         f.parse(&pdf::primitive::PdfString::new(data));
-        assert_eq!(f.getf32(), Some(82.00));
+        assert_eq!(f.get_decimal(), Some(dec!(82.000)));
 
         // company code
         let data: Vec<u8> = vec!['D' as u8, 'L' as u8, 'B' as u8];
@@ -1721,11 +1720,11 @@ mod tests {
                 "12/02/25".to_owned(),
                 "12/05/25".to_owned(),
                 82,
-                Decimal::from_str("28.2035").unwrap(),
-                Decimal::from_str("2312.69").unwrap(),
+                dec!(28.2035),
+                dec!(2312.69),
                 Decimal::ZERO,
-                Decimal::from_str("1.22").unwrap(),
-                Decimal::from_str("2311.47").unwrap(),
+                dec!(1.22),
+                dec!(2311.47),
             )
         );
 
@@ -1807,9 +1806,9 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(F32Entry { val: 42.0 })); //quantity
-        processed_sequence.push(Box::new(F32Entry { val: 28.8400 })); // Price
-        processed_sequence.push(Box::new(F32Entry { val: 1210.83 })); // Amount Sold
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
         yield_sold_transaction(&mut processed_sequence.iter(), &mut transaction_dates)
             .ok_or("Parsing error".to_string())?;
@@ -1828,9 +1827,9 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(F32Entry { val: 42.0 })); //quantity
-        processed_sequence.push(Box::new(F32Entry { val: 28.8400 })); // Price
-        processed_sequence.push(Box::new(F32Entry { val: 1210.83 })); // Amount Sold
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
         yield_sold_transaction(&mut processed_sequence.iter(), &mut transaction_dates)
             .ok_or("Parsing error".to_string())?;
@@ -1845,9 +1844,9 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(F32Entry { val: 42.0 })); //quantity
-        processed_sequence.push(Box::new(F32Entry { val: 28.8400 })); // Price
-        processed_sequence.push(Box::new(F32Entry { val: 1210.83 })); // Amount Sold
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
+        processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
         assert_eq!(
             yield_sold_transaction(&mut processed_sequence.iter(), &mut transaction_dates),
@@ -1988,19 +1987,19 @@ mod tests {
         assert_eq!(
             parse_statement("data/MS_ClientStatements_6557_202312.pdf"),
             (Ok((
-                vec![("12/1/23".to_owned(), 1.22, 0.00)],
+                vec![("12/1/23".to_owned(), dec!(1.22), dec!(0.00))],
                 vec![(
                     "12/1/23".to_owned(),
-                    386.50,
-                    57.98,
+                    dec!(386.50),
+                    dec!(57.98),
                     Some("INTEL CORP".to_string())
                 ),],
                 vec![(
                     "12/21/23".to_owned(),
                     "12/26/23".to_owned(),
-                    82.0,
-                    46.45,
-                    3808.86,
+                    dec!(82.0),
+                    dec!(46.45),
+                    dec!(3808.86),
                     Some("INTEL CORP".to_string())
                 )],
                 vec![]
@@ -2015,7 +2014,7 @@ mod tests {
         assert_eq!(
             parse_statement("data/example_interests_taxing.pdf"),
             (Ok((
-                vec![("1/2/24".to_owned(), 0.92, 0.22)],
+                vec![("1/2/24".to_owned(), dec!(0.92), dec!(0.22))],
                 vec![],
                 vec![],
                 vec![]
@@ -2031,28 +2030,28 @@ mod tests {
             parse_statement("etrade_data_2024/ClientStatements_010325.pdf"),
             (Ok((
                 vec![
-                    ("12/2/24".to_owned(), 4.88, 0.00),
-                    ("10/1/24".to_owned(), 24.91, 0.00),
-                    ("11/1/24".to_owned(), 25.09, 0.00),
-                    ("9/3/24".to_owned(), 23.65, 0.00), // Interest rates
-                    ("8/1/24".to_owned(), 4.34, 0.00),
-                    ("7/1/24".to_owned(), 3.72, 0.00),
-                    ("6/3/24".to_owned(), 13.31, 0.00),
-                    ("5/1/24".to_owned(), 0.62, 0.00),
-                    ("4/1/24".to_owned(), 1.16, 0.00),
-                    ("1/2/24".to_owned(), 0.49, 0.00)
+                    ("12/2/24".to_owned(), dec!(4.88), dec!(0.00)),
+                    ("10/1/24".to_owned(), dec!(24.91), dec!(0.00)),
+                    ("11/1/24".to_owned(), dec!(25.09), dec!(0.00)),
+                    ("9/3/24".to_owned(), dec!(23.65), dec!(0.00)), // Interest rates
+                    ("8/1/24".to_owned(), dec!(4.34), dec!(0.00)),
+                    ("7/1/24".to_owned(), dec!(3.72), dec!(0.00)),
+                    ("6/3/24".to_owned(), dec!(13.31), dec!(0.00)),
+                    ("5/1/24".to_owned(), dec!(0.62), dec!(0.00)),
+                    ("4/1/24".to_owned(), dec!(1.16), dec!(0.00)),
+                    ("1/2/24".to_owned(), dec!(0.49), dec!(0.00))
                 ],
                 vec![
                     (
                         "6/3/24".to_owned(),
-                        57.25,
-                        8.59,
+                        dec!(57.25),
+                        dec!(8.59),
                         Some("INTEL CORP".to_owned())
                     ), // Dividends date, gross, tax_us
                     (
                         "3/1/24".to_owned(),
-                        380.25,
-                        57.04,
+                        dec!(380.25),
+                        dec!(57.04),
                         Some("INTEL CORP".to_owned())
                     )
                 ],
@@ -2060,233 +2059,233 @@ mod tests {
                     (
                         "12/4/24".to_owned(),
                         "12/5/24".to_owned(),
-                        30.0,
-                        22.5,
-                        674.98,
+                        dec!(30.0),
+                        dec!(22.5),
+                        dec!(674.98),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "12/5/24".to_owned(),
                         "12/6/24".to_owned(),
-                        55.0,
-                        21.96,
-                        1207.76,
+                        dec!(55.0),
+                        dec!(21.96),
+                        dec!(1207.76),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "11/1/24".to_owned(),
                         "11/4/24".to_owned(),
-                        15.0,
-                        23.32,
-                        349.79,
+                        dec!(15.0),
+                        dec!(23.32),
+                        dec!(349.79),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "9/3/24".to_owned(),
                         "9/4/24".to_owned(),
-                        17.0,
-                        21.53,
-                        365.99,
+                        dec!(17.0),
+                        dec!(21.53),
+                        dec!(365.99),
                         Some("INTEL CORP".to_string())
                     ), // Sold
                     (
                         "9/9/24".to_owned(),
                         "9/10/24".to_owned(),
-                        14.0,
-                        18.98,
-                        265.71,
+                        dec!(14.0),
+                        dec!(18.98),
+                        dec!(265.71),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "8/5/24".to_owned(),
                         "8/6/24".to_owned(),
-                        14.0,
-                        20.21,
-                        282.93,
+                        dec!(14.0),
+                        dec!(20.21),
+                        dec!(282.93),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "8/20/24".to_owned(),
                         "8/21/24".to_owned(),
-                        328.0,
-                        21.0247,
-                        6895.89,
+                        dec!(328.0),
+                        dec!(21.0247),
+                        dec!(6895.89),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "7/31/24".to_owned(),
                         "8/1/24".to_owned(),
-                        151.0,
-                        30.44,
-                        4596.31,
+                        dec!(151.0),
+                        dec!(30.44),
+                        dec!(4596.31),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "6/3/24".to_owned(),
                         "6/4/24".to_owned(),
-                        14.0,
-                        31.04,
-                        434.54,
+                        dec!(14.0),
+                        dec!(31.04),
+                        dec!(434.54),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        126.0,
-                        30.14,
-                        3797.6,
+                        dec!(126.0),
+                        dec!(30.14),
+                        dec!(3797.6),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        124.0,
-                        30.14,
-                        3737.33,
+                        dec!(124.0),
+                        dec!(30.14),
+                        dec!(3737.33),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        89.0,
-                        30.6116,
-                        2724.4,
+                        dec!(89.0),
+                        dec!(30.6116),
+                        dec!(2724.4),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/2/24".to_owned(),
                         "5/6/24".to_owned(),
-                        182.0,
-                        30.56,
-                        5561.87,
+                        dec!(182.0),
+                        dec!(30.56),
+                        dec!(5561.87),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        440.0,
-                        30.835,
-                        13567.29,
+                        dec!(440.0),
+                        dec!(30.835),
+                        dec!(13567.29),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        198.0,
-                        30.835,
-                        6105.28,
+                        dec!(198.0),
+                        dec!(30.835),
+                        dec!(6105.28),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        146.0,
-                        30.8603,
-                        4505.56,
+                        dec!(146.0),
+                        dec!(30.8603),
+                        dec!(4505.56),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        145.0,
-                        30.8626,
-                        4475.04,
+                        dec!(145.0),
+                        dec!(30.8626),
+                        dec!(4475.04),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        75.0,
-                        30.815,
-                        2311.11,
+                        dec!(75.0),
+                        dec!(30.815),
+                        dec!(2311.11),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/6/24".to_owned(),
                         "5/8/24".to_owned(),
-                        458.0,
-                        31.11,
-                        14248.26,
+                        dec!(458.0),
+                        dec!(31.11),
+                        dec!(14248.26),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "5/31/24".to_owned(),
                         "6/3/24".to_owned(),
-                        18.0,
-                        30.22,
-                        543.94,
+                        dec!(18.0),
+                        dec!(30.22),
+                        dec!(543.94),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/3/24".to_owned(),
                         "4/5/24".to_owned(),
-                        31.0,
-                        40.625,
-                        1259.36,
+                        dec!(31.0),
+                        dec!(40.625),
+                        dec!(1259.36),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/11/24".to_owned(),
                         "4/15/24".to_owned(),
-                        209.0,
-                        37.44,
-                        7824.89,
+                        dec!(209.0),
+                        dec!(37.44),
+                        dec!(7824.89),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/11/24".to_owned(),
                         "4/15/24".to_owned(),
-                        190.0,
-                        37.44,
-                        7113.54,
+                        dec!(190.0),
+                        dec!(37.44),
+                        dec!(7113.54),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/16/24".to_owned(),
                         "4/18/24".to_owned(),
-                        310.0,
-                        36.27,
-                        11243.61,
+                        dec!(310.0),
+                        dec!(36.27),
+                        dec!(11243.61),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        153.0,
-                        31.87,
-                        4876.07,
+                        dec!(153.0),
+                        dec!(31.87),
+                        dec!(4876.07),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        131.0,
-                        31.87,
-                        4174.93,
+                        dec!(131.0),
+                        dec!(31.87),
+                        dec!(4174.93),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        87.0,
-                        31.87,
-                        2772.66,
+                        dec!(87.0),
+                        dec!(31.87),
+                        dec!(2772.66),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "3/11/24".to_owned(),
                         "3/13/24".to_owned(),
-                        38.0,
-                        43.85,
-                        1666.28,
+                        dec!(38.0),
+                        dec!(43.85),
+                        dec!(1666.28),
                         Some("INTEL CORP".to_string())
                     ),
                     (
                         "2/20/24".to_owned(),
                         "2/22/24".to_owned(),
-                        150.0,
-                        43.9822,
-                        6597.27,
+                        dec!(150.0),
+                        dec!(43.9822),
+                        dec!(6597.27),
                         Some("INTEL CORP".to_string())
                     )
                 ],
@@ -2308,17 +2307,17 @@ mod tests {
                     (
                         "11/10/23".to_owned(),
                         "11/14/23".to_owned(),
-                        72.0,
-                        118.13,
-                        8505.29,
+                        dec!(72.0),
+                        dec!(118.13),
+                        dec!(8505.29),
                         Some("ADVANCED MICRO DEVICES".to_string())
                     ),
                     (
                         "11/22/23".to_owned(),
                         "11/27/23".to_owned(),
-                        162.0,
-                        122.4511,
-                        19836.92,
+                        dec!(162.0),
+                        dec!(122.4511),
+                        dec!(19836.92),
                         Some("ADVANCED MICRO DEVICES".to_string())
                     ),
                 ],

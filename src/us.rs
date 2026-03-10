@@ -1,27 +1,29 @@
 // SPDX-FileCopyrightText: 2022-2025 RustInFinance
 // SPDX-License-Identifier: BSD-3-Clause
 
+use rust_decimal::Decimal;
+
 pub struct US {}
 impl etradeTaxReturnHelper::Residency for US {
     fn get_exchange_rates(
         &self,
         dates: &mut std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         >,
     ) -> Result<(), String> {
         dates.iter_mut().for_each(|(_date, val)| {
-            *val = Some(("N/A".to_owned(), 1.0));
+            *val = Some(("N/A".to_owned(), Decimal::ONE));
         });
         Ok(())
     }
 
     fn present_result(
         &self,
-        gross_div: f32,
-        tax_div: f32,
-        gross_sold: f32,
-        cost_sold: f32,
+        gross_div: Decimal,
+        tax_div: Decimal,
+        gross_sold: Decimal,
+        cost_sold: Decimal,
     ) -> (Vec<String>, Option<String>) {
         let mut presentation: Vec<String> = vec![];
         presentation.push(format!("===> (DIVIDENDS) INCOME: ${:.2}", gross_div));
@@ -38,14 +40,15 @@ impl etradeTaxReturnHelper::Residency for US {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::dec;
     #[test]
     fn test_present_result_us() -> Result<(), String> {
         let rd: Box<dyn etradeTaxReturnHelper::Residency> = Box::new(US {});
 
-        let gross_div = 100.0f32;
-        let tax_div = 15.0f32;
-        let gross_sold = 1000.0f32;
-        let cost_sold = 10.0f32;
+        let gross_div = dec!(100.0);
+        let tax_div = dec!(15.0);
+        let gross_sold = dec!(1000.0);
+        let cost_sold = dec!(10.0);
 
         let ref_results: Vec<String> = vec![
             "===> (DIVIDENDS) INCOME: $100.00".to_string(),

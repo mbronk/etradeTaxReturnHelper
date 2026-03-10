@@ -135,6 +135,8 @@ fn main() {
 mod tests {
     use super::*;
     use clap::Command;
+    use rust_decimal::dec;
+    use rust_decimal::Decimal;
 
     #[test]
     fn test_exchange_rate_de() -> Result<(), String> {
@@ -142,7 +144,7 @@ mod tests {
 
         let mut dates: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
 
         dates.insert(
@@ -157,10 +159,8 @@ mod tests {
             .clone()
             .unwrap();
 
-        assert_eq!(
-            (exchange_rate_date, exchange_rate),
-            ("2023-02-20".to_owned(), 0.9368559)
-        );
+        assert_eq!(exchange_rate_date, "2023-02-20");
+        assert_eq!(exchange_rate, dec!(0.9368559115608019486602960465));
         Ok(())
     }
 
@@ -170,7 +170,7 @@ mod tests {
 
         let mut dates: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
 
         dates.insert(
@@ -187,7 +187,7 @@ mod tests {
 
         assert_eq!(
             (exchange_rate_date, exchange_rate),
-            ("2021-02-26".to_owned(), 3.7247)
+            ("2021-02-26".to_owned(), dec!(3.7247))
         );
         Ok(())
     }
@@ -198,7 +198,7 @@ mod tests {
 
         let mut dates: std::collections::HashMap<
             etradeTaxReturnHelper::Exchange,
-            Option<(String, f32)>,
+            Option<(String, Decimal)>,
         > = std::collections::HashMap::new();
 
         dates.insert(
@@ -213,7 +213,7 @@ mod tests {
             .clone()
             .unwrap();
 
-        assert_eq!((exchange_rate_date, exchange_rate), ("N/A".to_owned(), 1.0));
+        assert_eq!((exchange_rate_date, exchange_rate), ("N/A".to_owned(), Decimal::ONE));
         Ok(())
     }
 
@@ -405,7 +405,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     (gross_div, tax_div, gross_sold, cost_sold),
-                    (6331.29, 871.17993, 0.0, 0.0),
+                    (dec!(6331.29), dec!(871.18), dec!(0), dec!(0)),
                 );
                 Ok(())
             }
@@ -438,7 +438,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     (gross_div, tax_div, gross_sold, cost_sold),
-                    (9142.319, 1207.08, 22988.617, 20163.5),
+                    (dec!(9142.32), dec!(1207.08), dec!(22988.617048), dec!(20163.5000)),
                 );
                 Ok(())
             }
@@ -471,7 +471,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     (gross_div, tax_div, gross_sold, cost_sold),
-                    (86.93008, 0.0, 0.0, 0.0),
+                    (dec!(86.93), dec!(0), dec!(0), dec!(0)),
                 );
                 Ok(())
             }
@@ -505,7 +505,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     (gross_div, tax_div, gross_sold, cost_sold),
-                    (219.34755, 0.0, 89845.65, 44369.938),
+                    (dec!(219.34755), dec!(0.0), dec!(89845.65), dec!(44369.938)),
                 );
                 Ok(())
             }
@@ -536,7 +536,7 @@ mod tests {
             }) => {
                 assert_eq!(
                     (gross_div, tax_div, gross_sold, cost_sold),
-                    (0.66164804, 0.0, 0.0, 0.0),
+                    (dec!(0.66164804), dec!(0.0), dec!(0.0), dec!(0.0)),
                 );
                 Ok(())
             }
