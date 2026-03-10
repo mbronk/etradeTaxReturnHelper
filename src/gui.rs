@@ -129,9 +129,15 @@ fn create_execute_documents(
             revolut_dividends_transactions: revolut_transactions,
             sold_transactions,
             revolut_sold_transactions,
+            missing_trade_confirmations_warning: _,
         } = match run_taxation(&rd, file_names,false, false) {
             Ok(res) => {
-                nbuffer.set_text("Finished.\n\n (Double check if generated tax data (Summary) makes sense and then copy it to your tax form)");
+                let mut finish_msg = "Finished.\n\n (Double check if generated tax data (Summary) makes sense and then copy it to your tax form)".to_string();
+                if let Some(ref tc_warning) = res.missing_trade_confirmations_warning {
+                    finish_msg.push_str("\n\n");
+                    finish_msg.push_str(tc_warning);
+                }
+                nbuffer.set_text(&finish_msg);
                 res
             }
             Err(err) => {
