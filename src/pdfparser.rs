@@ -42,7 +42,7 @@ enum ParserState {
 }
 
 pub trait Entry {
-    fn parse(&mut self, pstr: &pdf::primitive::PdfString);
+    fn parse(&mut self, pstr: &pdf::primitive::PdfString) -> Result<(), String>;
     fn get_decimal(&self) -> Option<Decimal> {
         None
     }
@@ -67,11 +67,11 @@ struct DecimalEntry {
 }
 
 impl Entry for DecimalEntry {
-    fn parse(&mut self, pstr: &pdf::primitive::PdfString) {
+    fn parse(&mut self, pstr: &pdf::primitive::PdfString) -> Result<(), String> {
         let mystr = pstr
             .clone()
             .into_string()
-            .expect(&format!("Error parsing : {:#?} to Decimal", pstr));
+            .map_err(|_| format!("Error parsing : {:#?} to Decimal", pstr))?;
         // Extracted string should have "," removed and then be parsed
         let cleaned = mystr
             .trim()
@@ -80,8 +80,9 @@ impl Entry for DecimalEntry {
             .replace(")", "")
             .replace("$", "");
         self.val = Decimal::from_str(&cleaned)
-            .expect(&format!("Error parsing : {} to Decimal", mystr));
+            .map_err(|_| format!("Error parsing : {} to Decimal", mystr))?;
         log::info!("Parsed Decimal value: {}", self.val);
+        Ok(())
     }
     fn get_decimal(&self) -> Option<Decimal> {
         Some(self.val)
@@ -93,15 +94,23 @@ struct I32Entry {
 }
 
 impl Entry for I32Entry {
-    fn parse(&mut self, pstr: &pdf::primitive::PdfString) {
+    fn parse(&mut self, pstr: &pdf::primitive::PdfString) -> Result<(), String> {
         let mystr = pstr
             .clone()
             .into_string()
-            .expect(&format!("Error parsing : {:#?} to i32", pstr));
-        self.val = mystr
+            .map_err(|_| format!("Error parsing : {:#?} to i32", pstr))?;
+        let cleaned = mystr.trim().replace(",", "");
+        self.val = cleaned
             .parse::<i32>()
-            .expect(&format!("Error parsing : {} to i32", mystr));
+            .or_else(|_| {  // Handle cases where the number might be formatted as a decimal with no fractional part, e.g., "100.00"
+                Decimal::from_str(&cleaned)
+                    .ok()
+                    .filter(|d| d.fract().is_zero())
+                    .and_then(|d| d.to_i32())
+                    .ok_or_else(|| format!("Error parsing : {} to i32", mystr))
+            })?;
         log::info!("Parsed i32 value: {}", self.val);
+        Ok(())
     }
     fn geti32(&self) -> Option<i32> {
         Some(self.val)
@@ -113,16 +122,17 @@ struct DateEntry {
 }
 
 impl Entry for DateEntry {
-    fn parse(&mut self, pstr: &pdf::primitive::PdfString) {
+    fn parse(&mut self, pstr: &pdf::primitive::PdfString) -> Result<(), String> {
         let mystr = pstr
             .clone()
             .into_string()
-            .expect(&format!("Error parsing : {:#?} to Data", pstr));
+            .map_err(|_| format!("Error parsing : {:#?} to Date", pstr))?;
 
         if chrono::NaiveDate::parse_from_str(&mystr, "%m/%d/%y").is_ok() {
             self.val = mystr;
             log::info!("Parsed date value: {}", self.val);
         }
+        Ok(())
     }
     fn getdate(&self) -> Option<String> {
         Some(self.val.clone())
@@ -135,12 +145,13 @@ struct StringEntry {
 }
 
 impl Entry for StringEntry {
-    fn parse(&mut self, pstr: &pdf::primitive::PdfString) {
+    fn parse(&mut self, pstr: &pdf::primitive::PdfString) -> Result<(), String> {
         self.val = pstr
             .clone()
             .into_string()
-            .expect(&format!("Error parsing : {:#?} to String", pstr));
+            .map_err(|_| format!("Error parsing : {:#?} to String", pstr))?;
         log::info!("Parsed String value: {}", self.val);
+        Ok(())
     }
     fn getstring(&self) -> Option<String> {
         Some(self.val.clone())
@@ -421,7 +432,7 @@ fn process_trade_confirmation_transaction(
         return Ok(());
     };
 
-    obj.parse(actual_string);
+    obj.parse(actual_string)?;
 
     match obj.getstring() {
         Some(token) => {
@@ -1189,7 +1200,7 @@ fn process_transaction(
         // attach only i32 and f32 elements to
         // processed queue
         Some(mut obj) => {
-            obj.parse(actual_string);
+            obj.parse(actual_string)?;
             // attach to sequence the same string parser if pattern is not met
             match obj.getstring() {
                 Some(token) => {
