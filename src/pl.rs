@@ -241,7 +241,7 @@ impl etradeTaxReturnHelper::Residency for PL {
         cost_sold: Decimal,
     ) -> (Vec<String>, Option<String>) {
         let mut presentation: Vec<String> = vec![];
-        let tax_pl = dec!(0.19) * gross_div;
+        let tax_pl = dec!(0.19) * gross_div;  // Invalid, needs to be split across dividends and interests
         presentation.push(format!(
             "(DYWIDENDY) PRZYCHOD Z ZAGRANICY: {:.2} PLN",
             gross_div

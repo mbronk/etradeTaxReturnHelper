@@ -322,12 +322,12 @@ fn compute_sold_taxation(transactions: &Vec<SoldTransaction>) -> (Decimal, Decim
     // Net income from sold stock in target currency (PLN, EUR etc.)
     let gross_us_pl: Decimal = transactions
         .iter()
-        .map(|x| x.exchange_rate_trade * x.income_us)
+        .map(|x| (x.exchange_rate_trade * x.income_us).round_dp(2))
         .sum();
     // Cost of income e.g. cost_basis[target currency]
     let cost_us_pl: Decimal = transactions
         .iter()
-        .map(|x| x.exchange_rate_acquisition * x.cost_basis)
+        .map(|x| (x.exchange_rate_acquisition * x.cost_basis).round_dp(2))
         .sum();
     (gross_us_pl, cost_us_pl)
 }
