@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2022-2025 RustInFinance
 // SPDX-License-Identifier: BSD-3-Clause
 
+#![debugger_visualizer(natvis_file = "../rust_decimal.natvis")]
+
 use clap::{Arg, Command};
 use std::env;
 

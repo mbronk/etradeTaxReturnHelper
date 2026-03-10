@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2022-2025 RustInFinance
 // SPDX-License-Identifier: BSD-3-Clause
 
+#![debugger_visualizer(natvis_file = "../rust_decimal.natvis")]
+
 mod csvparser;
 mod ecb;
 mod logging;
@@ -394,8 +396,8 @@ pub fn run_taxation(
 
     let mut parsed_interests_transactions: Vec<(String, Decimal, Decimal)> = vec![];
     let mut parsed_div_transactions: Vec<(String, Decimal, Decimal, Option<String>)> = vec![];
-    let mut parsed_sold_transactions: Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)> = vec![];
-    let mut parsed_gain_and_losses: Vec<(String, String, Decimal, Decimal, Decimal, Decimal)> = vec![];
+    let mut parsed_sold_transactions: Vec<(String, String, i32, Decimal, Decimal, Option<String>)> = vec![];
+    let mut parsed_gain_and_losses: Vec<(String, String, Decimal, Decimal, Decimal, i32)> = vec![];
     let mut parsed_sell_trade_confirmations: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
     let mut parsed_revolut_dividends_transactions: Vec<(
         String,

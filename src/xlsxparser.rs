@@ -17,7 +17,7 @@ pub use crate::logging::ResultExt;
 /// quantity sold (quantity)
 pub fn parse_gains_and_losses(
     xlsxtoparse: &str,
-) -> Result<Vec<(String, String, Decimal, Decimal, Decimal, Decimal)>, &str> {
+) -> Result<Vec<(String, String, Decimal, Decimal, Decimal, i32)>, &str> {
     let mut excel: Xlsx<_> =
         open_workbook(xlsxtoparse).map_err(|_| "Error opening XLSX file: {}")?;
     let name = excel
@@ -26,7 +26,7 @@ pub fn parse_gains_and_losses(
         .expect_and_log("No worksheet found")
         .clone();
     log::info!("name: {}", name);
-    let mut transactions: Vec<(String, String, Decimal, Decimal, Decimal, Decimal)> = vec![];
+    let mut transactions: Vec<(String, String, Decimal, Decimal, Decimal, i32)> = vec![];
     if let Some(Ok(r)) = excel.worksheet_range(&name) {
         let mut rows = r.rows();
         let categories = rows
@@ -98,10 +98,10 @@ pub fn parse_gains_and_losses(
                 Decimal::from_str(&transakcja[acquistion_cost_idx].get_float().unwrap().to_string()).unwrap(),
                 Decimal::from_str(&transakcja[cost_basis_idx].get_float().unwrap().to_string()).unwrap(),
                 Decimal::from_str(&transakcja[total_proceeds_idx].get_float().unwrap().to_string()).unwrap(),
-                Decimal::from_str(&quantity_idx
+                quantity_idx
                     .and_then(|i| transakcja.get(i))
                     .and_then(|c| c.get_float())
-                    .unwrap_or(0.0).to_string()).unwrap(),
+                    .unwrap_or(0.0) as i32,
             ));
         }
     }
@@ -116,7 +116,7 @@ mod tests {
     use rust_decimal::dec;
 
     fn strip_qty(
-        rows: Vec<(String, String, Decimal, Decimal, Decimal, Decimal)>,
+        rows: Vec<(String, String, Decimal, Decimal, Decimal, i32)>,
     ) -> Vec<(String, String, Decimal, Decimal, Decimal)> {
         rows.into_iter()
             .map(|(a, b, c, d, e, _)| (a, b, c, d, e))
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_parse_gain_and_losses() -> Result<(), String> {
         let collapsed = parse_gains_and_losses("data/G&L_Collapsed.xlsx")?;
-        assert!(collapsed.iter().all(|(_, _, _, _, _, qty)| *qty >= Decimal::ZERO));
+        assert!(collapsed.iter().all(|(_, _, _, _, _, qty)| *qty >= 0));
         assert_eq!(
             strip_qty(collapsed),
             vec![
@@ -148,7 +148,7 @@ mod tests {
         );
 
         let expanded = parse_gains_and_losses("data/G&L_Expanded.xlsx")?;
-        assert!(expanded.iter().all(|(_, _, _, _, _, qty)| *qty >= Decimal::ZERO));
+        assert!(expanded.iter().all(|(_, _, _, _, _, qty)| *qty >= 0));
         assert_eq!(
             strip_qty(expanded),
             vec![
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_parse_gain_and_losses_pl() -> Result<(), String> {
         let parsed = parse_gains_and_losses("data/G&L_Expanded_polish.xlsx")?;
-        assert!(parsed.iter().all(|(_, _, _, _, _, qty)| *qty >= Decimal::ZERO));
+        assert!(parsed.iter().all(|(_, _, _, _, _, qty)| *qty >= 0));
         assert_eq!(
             strip_qty(parsed),
             vec![

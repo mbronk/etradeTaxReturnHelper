@@ -240,7 +240,7 @@ fn create_sold_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dy
         val: String::new(),
         patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
     })); // INTC, DLB
-    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Quantity
+    sequence.push_back(Box::new(I32Entry { val: 0 })); // Quantity
     sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Price
     sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Amount Sold
 }
@@ -258,7 +258,7 @@ fn create_sold_2_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<
         val: String::new(),
         patterns: vec!["UNSOLICITED TRADE".to_owned()],
     }));
-    sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Quantity
+    sequence.push_back(Box::new(I32Entry { val: 0 })); // Quantity
     sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Price
     sequence.push_back(Box::new(DecimalEntry { val: Decimal::ZERO })); // Amount Sold
 }
@@ -785,7 +785,7 @@ fn parse_trade_confirmation_lopdf(
     (
         Vec<(String, Decimal, Decimal)>,
         Vec<(String, Decimal, Decimal, Option<String>)>,
-        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -857,7 +857,7 @@ fn parse_trade_confirmation<'a, I>(
     (
         Vec<(String, Decimal, Decimal)>,
         Vec<(String, Decimal, Decimal, Option<String>)>,
-        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -867,7 +867,7 @@ where
 {
     let interests_transactions: Vec<(String, Decimal, Decimal)> = vec![];
     let div_transactions: Vec<(String, Decimal, Decimal, Option<String>)> = vec![];
-    let sold_transactions: Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)> = vec![];
+    let sold_transactions: Vec<(String, String, i32, Decimal, Decimal, Option<String>)> = vec![];
     let mut trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
 
     let full_date_pattern = regex::Regex::new(r"^(0?[1-9]|1[012])/(0?[1-9]|[12][0-9]|3[01])/\\d{2}$")
@@ -999,7 +999,7 @@ where
 fn yield_sold_transaction(
     transaction: &mut std::slice::Iter<'_, Box<dyn Entry>>,
     transaction_dates: &mut Vec<String>,
-) -> Option<(String, String, Decimal, Decimal, Decimal, Option<String>)> {
+) -> Option<(String, String, i32, Decimal, Decimal, Option<String>)> {
     let symbol = transaction
         .next()
         .unwrap()
@@ -1008,7 +1008,7 @@ fn yield_sold_transaction(
     let quantity = transaction
         .next()
         .unwrap()
-        .get_decimal()
+        .geti32()
         .expect_and_log("Processing of Sold transaction went wrong");
     let price = transaction
         .next()
@@ -1175,7 +1175,7 @@ fn recognize_statement(page: PageRc, pdftoparse: &str) -> Result<StatementType, 
 fn process_transaction(
     interests_transactions: &mut Vec<(String, Decimal, Decimal)>,
     div_transactions: &mut Vec<(String, Decimal, Decimal, Option<String>)>,
-    sold_transactions: &mut Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+    sold_transactions: &mut Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
     actual_string: &pdf::primitive::PdfString,
     transaction_dates: &mut Vec<String>,
     processed_sequence: &mut Vec<Box<dyn Entry>>,
@@ -1401,7 +1401,7 @@ fn parse_account_statement<'a, I>(
     (
         Vec<(String, Decimal, Decimal)>,
         Vec<(String, Decimal, Decimal, Option<String>)>,
-        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1411,7 +1411,7 @@ where
 {
     let mut interests_transactions: Vec<(String, Decimal, Decimal)> = vec![];
     let mut div_transactions: Vec<(String, Decimal, Decimal, Option<String>)> = vec![];
-    let mut sold_transactions: Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)> = vec![];
+    let mut sold_transactions: Vec<(String, String, i32, Decimal, Decimal, Option<String>)> = vec![];
     let trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
     let mut state = ParserState::SearchingYear;
     let mut sequence: VecDeque<Box<dyn Entry>> = VecDeque::new();
@@ -1526,7 +1526,7 @@ pub(crate) fn parse_statement_with_seen_pages(
     (
         Vec<(String, Decimal, Decimal)>,
         Vec<(String, Decimal, Decimal, Option<String>)>,
-        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1593,7 +1593,7 @@ pub fn parse_statement(
     (
         Vec<(String, Decimal, Decimal)>,
         Vec<(String, Decimal, Decimal, Option<String>)>,
-        Vec<(String, String, Decimal, Decimal, Decimal, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Option<String>)>,
         Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
@@ -1806,7 +1806,7 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(I32Entry { val: 42 })); //quantity
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
@@ -1827,7 +1827,7 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(I32Entry { val: 42 })); //quantity
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
@@ -1844,7 +1844,7 @@ mod tests {
             val: String::new(),
             patterns: vec!["INTC".to_owned(), "DLB".to_owned()],
         })); // INTC, DLB
-        processed_sequence.push(Box::new(DecimalEntry { val: dec!(42.0) })); //quantity
+        processed_sequence.push(Box::new(I32Entry { val: 42 })); //quantity
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(28.8400) })); // Price
         processed_sequence.push(Box::new(DecimalEntry { val: dec!(1210.83) })); // Amount Sold
 
@@ -1997,7 +1997,7 @@ mod tests {
                 vec![(
                     "12/21/23".to_owned(),
                     "12/26/23".to_owned(),
-                    dec!(82.0),
+                    82,
                     dec!(46.45),
                     dec!(3808.86),
                     Some("INTEL CORP".to_string())
@@ -2059,7 +2059,7 @@ mod tests {
                     (
                         "12/4/24".to_owned(),
                         "12/5/24".to_owned(),
-                        dec!(30.0),
+                        30,
                         dec!(22.5),
                         dec!(674.98),
                         Some("INTEL CORP".to_string())
@@ -2067,7 +2067,7 @@ mod tests {
                     (
                         "12/5/24".to_owned(),
                         "12/6/24".to_owned(),
-                        dec!(55.0),
+                        55,
                         dec!(21.96),
                         dec!(1207.76),
                         Some("INTEL CORP".to_string())
@@ -2075,7 +2075,7 @@ mod tests {
                     (
                         "11/1/24".to_owned(),
                         "11/4/24".to_owned(),
-                        dec!(15.0),
+                        15,
                         dec!(23.32),
                         dec!(349.79),
                         Some("INTEL CORP".to_string())
@@ -2083,7 +2083,7 @@ mod tests {
                     (
                         "9/3/24".to_owned(),
                         "9/4/24".to_owned(),
-                        dec!(17.0),
+                        17,
                         dec!(21.53),
                         dec!(365.99),
                         Some("INTEL CORP".to_string())
@@ -2091,7 +2091,7 @@ mod tests {
                     (
                         "9/9/24".to_owned(),
                         "9/10/24".to_owned(),
-                        dec!(14.0),
+                        14,
                         dec!(18.98),
                         dec!(265.71),
                         Some("INTEL CORP".to_string())
@@ -2099,7 +2099,7 @@ mod tests {
                     (
                         "8/5/24".to_owned(),
                         "8/6/24".to_owned(),
-                        dec!(14.0),
+                        14,
                         dec!(20.21),
                         dec!(282.93),
                         Some("INTEL CORP".to_string())
@@ -2107,7 +2107,7 @@ mod tests {
                     (
                         "8/20/24".to_owned(),
                         "8/21/24".to_owned(),
-                        dec!(328.0),
+                        328,
                         dec!(21.0247),
                         dec!(6895.89),
                         Some("INTEL CORP".to_string())
@@ -2115,7 +2115,7 @@ mod tests {
                     (
                         "7/31/24".to_owned(),
                         "8/1/24".to_owned(),
-                        dec!(151.0),
+                        151,
                         dec!(30.44),
                         dec!(4596.31),
                         Some("INTEL CORP".to_string())
@@ -2123,7 +2123,7 @@ mod tests {
                     (
                         "6/3/24".to_owned(),
                         "6/4/24".to_owned(),
-                        dec!(14.0),
+                        14,
                         dec!(31.04),
                         dec!(434.54),
                         Some("INTEL CORP".to_string())
@@ -2131,7 +2131,7 @@ mod tests {
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        dec!(126.0),
+                        126,
                         dec!(30.14),
                         dec!(3797.6),
                         Some("INTEL CORP".to_string())
@@ -2139,7 +2139,7 @@ mod tests {
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        dec!(124.0),
+                        124,
                         dec!(30.14),
                         dec!(3737.33),
                         Some("INTEL CORP".to_string())
@@ -2147,7 +2147,7 @@ mod tests {
                     (
                         "5/1/24".to_owned(),
                         "5/3/24".to_owned(),
-                        dec!(89.0),
+                        89,
                         dec!(30.6116),
                         dec!(2724.4),
                         Some("INTEL CORP".to_string())
@@ -2155,7 +2155,7 @@ mod tests {
                     (
                         "5/2/24".to_owned(),
                         "5/6/24".to_owned(),
-                        dec!(182.0),
+                        182,
                         dec!(30.56),
                         dec!(5561.87),
                         Some("INTEL CORP".to_string())
@@ -2163,7 +2163,7 @@ mod tests {
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        dec!(440.0),
+                        440,
                         dec!(30.835),
                         dec!(13567.29),
                         Some("INTEL CORP".to_string())
@@ -2171,7 +2171,7 @@ mod tests {
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        dec!(198.0),
+                        198,
                         dec!(30.835),
                         dec!(6105.28),
                         Some("INTEL CORP".to_string())
@@ -2179,7 +2179,7 @@ mod tests {
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        dec!(146.0),
+                        146,
                         dec!(30.8603),
                         dec!(4505.56),
                         Some("INTEL CORP".to_string())
@@ -2187,7 +2187,7 @@ mod tests {
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        dec!(145.0),
+                        145,
                         dec!(30.8626),
                         dec!(4475.04),
                         Some("INTEL CORP".to_string())
@@ -2195,7 +2195,7 @@ mod tests {
                     (
                         "5/3/24".to_owned(),
                         "5/7/24".to_owned(),
-                        dec!(75.0),
+                        75,
                         dec!(30.815),
                         dec!(2311.11),
                         Some("INTEL CORP".to_string())
@@ -2203,7 +2203,7 @@ mod tests {
                     (
                         "5/6/24".to_owned(),
                         "5/8/24".to_owned(),
-                        dec!(458.0),
+                        458,
                         dec!(31.11),
                         dec!(14248.26),
                         Some("INTEL CORP".to_string())
@@ -2211,7 +2211,7 @@ mod tests {
                     (
                         "5/31/24".to_owned(),
                         "6/3/24".to_owned(),
-                        dec!(18.0),
+                        18,
                         dec!(30.22),
                         dec!(543.94),
                         Some("INTEL CORP".to_string())
@@ -2219,7 +2219,7 @@ mod tests {
                     (
                         "4/3/24".to_owned(),
                         "4/5/24".to_owned(),
-                        dec!(31.0),
+                        31,
                         dec!(40.625),
                         dec!(1259.36),
                         Some("INTEL CORP".to_string())
@@ -2227,7 +2227,7 @@ mod tests {
                     (
                         "4/11/24".to_owned(),
                         "4/15/24".to_owned(),
-                        dec!(209.0),
+                        209,
                         dec!(37.44),
                         dec!(7824.89),
                         Some("INTEL CORP".to_string())
@@ -2235,7 +2235,7 @@ mod tests {
                     (
                         "4/11/24".to_owned(),
                         "4/15/24".to_owned(),
-                        dec!(190.0),
+                        190,
                         dec!(37.44),
                         dec!(7113.54),
                         Some("INTEL CORP".to_string())
@@ -2243,7 +2243,7 @@ mod tests {
                     (
                         "4/16/24".to_owned(),
                         "4/18/24".to_owned(),
-                        dec!(310.0),
+                        310,
                         dec!(36.27),
                         dec!(11243.61),
                         Some("INTEL CORP".to_string())
@@ -2251,7 +2251,7 @@ mod tests {
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        dec!(153.0),
+                        153,
                         dec!(31.87),
                         dec!(4876.07),
                         Some("INTEL CORP".to_string())
@@ -2259,7 +2259,7 @@ mod tests {
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        dec!(131.0),
+                        131,
                         dec!(31.87),
                         dec!(4174.93),
                         Some("INTEL CORP".to_string())
@@ -2267,7 +2267,7 @@ mod tests {
                     (
                         "4/29/24".to_owned(),
                         "5/1/24".to_owned(),
-                        dec!(87.0),
+                        87,
                         dec!(31.87),
                         dec!(2772.66),
                         Some("INTEL CORP".to_string())
@@ -2275,7 +2275,7 @@ mod tests {
                     (
                         "3/11/24".to_owned(),
                         "3/13/24".to_owned(),
-                        dec!(38.0),
+                        38,
                         dec!(43.85),
                         dec!(1666.28),
                         Some("INTEL CORP".to_string())
@@ -2283,7 +2283,7 @@ mod tests {
                     (
                         "2/20/24".to_owned(),
                         "2/22/24".to_owned(),
-                        dec!(150.0),
+                        150,
                         dec!(43.9822),
                         dec!(6597.27),
                         Some("INTEL CORP".to_string())
@@ -2307,7 +2307,7 @@ mod tests {
                     (
                         "11/10/23".to_owned(),
                         "11/14/23".to_owned(),
-                        dec!(72.0),
+                        72,
                         dec!(118.13),
                         dec!(8505.29),
                         Some("ADVANCED MICRO DEVICES".to_string())
@@ -2315,7 +2315,7 @@ mod tests {
                     (
                         "11/22/23".to_owned(),
                         "11/27/23".to_owned(),
-                        dec!(162.0),
+                        162,
                         dec!(122.4511),
                         dec!(19836.92),
                         Some("ADVANCED MICRO DEVICES".to_string())
