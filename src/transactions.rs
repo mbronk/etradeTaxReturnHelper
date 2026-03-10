@@ -4,6 +4,8 @@
 use chrono;
 use chrono::Datelike;
 use polars::prelude::*;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::HashMap;
 
 pub use crate::logging::ResultExt;
@@ -107,16 +109,186 @@ pub fn verify_transactions<T>(
 ///       TL;DR; For currency exchange for tax, we always take *T-1* NBP rate
 pub fn reconstruct_sold_transactions(
     sold_transactions: &Vec<(String, String, f32, f32, f32, Option<String>)>,
-    gains_and_losses: &Vec<(String, String, f32, f32, f32)>,
-) -> Result<Vec<(String, String, String, f32, f32, Option<String>)>, String> {
+    gains_and_losses: &Vec<(String, String, f32, f32, f32, f32)>,
+    trade_confirmations: &Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+) -> Result<(Vec<(String, String, String, f32, f32, f32, Option<String>)>, Option<String>), String> {
+    #[derive(Clone, Debug)]
+    struct SoldTransactionEx {
+        trade_date: String,
+        settlement_date: String,
+        quantity: f64,
+        price: f64,
+        symbol: Option<String>,
+        net_amount: Decimal,
+        commission: Decimal,
+        fee: Decimal,
+        has_trade_confirmation: bool,
+    }
+
+    fn build_sold_transactions_ex(
+        sold_transactions: &Vec<(String, String, f32, f32, f32, Option<String>)>,
+        trade_confirmations: &Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+    ) -> Result<Vec<SoldTransactionEx>, String> {
+        fn normalize_short_us_date_key(date: &str) -> String {
+            // Only normalize zero-padding for month/day. Keep original month/day field order.
+            let raw = date.trim();
+            let parts: Vec<&str> = raw.split('/').collect();
+            if parts.len() != 3 {
+                return raw.to_string();
+            }
+
+            let month = parts[0].trim();
+            let day = parts[1].trim();
+            let year = parts[2].trim();
+
+            let month_norm = if month.len() == 1 {
+                format!("0{month}")
+            } else {
+                month.to_string()
+            };
+            let day_norm = if day.len() == 1 {
+                format!("0{day}")
+            } else {
+                day.to_string()
+            };
+
+            format!("{month_norm}/{day_norm}/{year}")
+        }
+
+        let mut confirmations_by_key: HashMap<(String, String, i32), Vec<(Decimal, Decimal, Decimal)>> =
+            HashMap::new();
+
+        for (trade_date, settlement_date, qty, _price, _principal, commission, fee, net_amount) in
+            trade_confirmations
+        {
+            let commission_val = *commission;
+            let fee_val = *fee;
+            confirmations_by_key
+                .entry((
+                    normalize_short_us_date_key(trade_date),
+                    normalize_short_us_date_key(settlement_date),
+                    *qty,
+                ))
+                .or_insert(vec![])
+                .push((*net_amount, commission_val, fee_val));
+        }
+
+        let mut sold_transactions_ex: Vec<SoldTransactionEx> = vec![];
+        for (trade_date, settlement_date, qty, price, _income, symbol) in sold_transactions {
+            let qty_key = qty.round() as i32;
+            let confirmation = confirmations_by_key
+                .get_mut(&(
+                    normalize_short_us_date_key(trade_date),
+                    normalize_short_us_date_key(settlement_date),
+                    qty_key,
+                ))
+                .and_then(|entries| entries.pop());
+
+            let (net_amount, commission, fee, has_trade_confirmation) = match confirmation {
+                Some((net_amount, commission, fee)) => (net_amount, commission, fee, true),
+                None => (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, false),
+            };
+
+            sold_transactions_ex.push(SoldTransactionEx {
+                trade_date: trade_date.clone(),
+                settlement_date: settlement_date.clone(),
+                quantity: *qty as f64,
+                price: *price as f64,
+                symbol: symbol.clone(),
+                net_amount,
+                commission,
+                fee,
+                has_trade_confirmation,
+            });
+        }
+
+        for ((trade_date, settlement_date, qty), entries) in confirmations_by_key {
+            if !entries.is_empty() {
+                return Err(format!(
+                    "\n\nERROR: Not all Trade Confirmations could be matched by trade date + settlement date + quantity.\n\
+Unmatched confirmation: trade_date={}, settlement_date={}, quantity={}\n",
+                    trade_date, settlement_date, qty
+                ));
+            }
+        }
+
+        Ok(sold_transactions_ex)
+    }
+
+    fn sanity_check_pdf_vs_gl_totals(
+        sold_transactions: &Vec<(String, String, f32, f32, f32, Option<String>)>,
+        gains_and_losses: &Vec<(String, String, f32, f32, f32, f32)>,
+    ) -> Result<(), String> {
+        let pdf_total: f64 = sold_transactions
+            .iter()
+            .map(|(_, _, _, _, income, _)| *income as f64)
+            .sum();
+        let gl_total: f64 = gains_and_losses
+            .iter()
+            .map(|(_, _, _, _, total_proceeds, _)| *total_proceeds as f64)
+            .sum();
+
+        let diff = (pdf_total - gl_total).abs();
+        // Keep tolerance below half a cent so values that differ at 2nd decimal (after rounding)
+        // are always rejected.
+        let accepted_delta = 0.004999_f64;
+
+        if diff > accepted_delta {
+            return Err(format!(
+                "\n\nERROR: Sold transactions mismatch between ClientStatement's PDFs and Gain&Losses XLSX.\n\
+PDF total proceeds: {pdf_total:.2}\n\
+G&L total proceeds: {gl_total:.2}\n\
+Difference: {diff:.2}\n\n\
+Please verify that all matching PDF account statements and exactly one Gain&Losses XLSX for the same period are selected.\n"
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn sanity_check_trade_confirmations(
+        trade_confirmations: &Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+        gains_and_losses: &Vec<(String, String, f32, f32, f32, f32)>,
+    ) -> Result<(), String> {
+        if trade_confirmations.is_empty() {
+            return Ok(());
+        }
+
+        let tc_total_net_amount: f64 = trade_confirmations
+            .iter()
+            .map(|(_, _, _, _, _, _, _, net_amount)| net_amount.to_f64().unwrap_or(0.0))
+            .sum();
+        let gl_total: f64 = gains_and_losses
+            .iter()
+            .map(|(_, _, _, _, total_proceeds, _)| *total_proceeds as f64)
+            .sum();
+
+        let diff = (tc_total_net_amount - gl_total).abs();
+        let accepted_delta = 0.004999_f64;
+
+        if diff > accepted_delta {
+            return Err(format!(
+                "\n\nERROR: Trade Confirmation totals mismatch with Gain&Losses XLSX.\n\
+Trade Confirmation total net amount: {tc_total_net_amount:.2}\n\
+G&L total proceeds: {gl_total:.2}\n\
+Difference: {diff:.2}\n\n\
+Please verify that all Trade Confirmation PDFs and the Gain&Losses XLSX match the same period.\n"
+            ));
+        }
+
+        log::info!("Trade Confirmation validation passed: net amount total matches G&L proceeds (diff: {diff:.4})");
+        Ok(())
+    }
+
     // Ok What do I need.
     // 1. trade date
     // 2. settlement date (display only, no tax implications)
     // 3. date of purchase
-    // 4. gross income
-    // 5. cost cost basis
-    // 6. company symbol (ticker)
-    let mut detailed_sold_transactions: Vec<(String, String, String, f32, f32, Option<String>)> =
+    // 4. gross income (or net if no confirmations)
+    // 5. cost basis
+    // 6. fees (when confirmations exist)
+    // 7. company symbol (ticker)
+    let mut detailed_sold_transactions: Vec<(String, String, String, f32, f32, f32, Option<String>)> =
         vec![];
 
     if sold_transactions.len() > 0 && gains_and_losses.is_empty() {
@@ -124,20 +296,244 @@ pub fn reconstruct_sold_transactions(
             https://us.etrade.com/etx/sp/stockplan#/myAccount/gainsLosses\n\n".to_string());
     }
 
+    let missing_tc_warning = if trade_confirmations.is_empty() && !gains_and_losses.is_empty() {
+        let warning = "⚠ NOTE: No Trade Confirmation PDFs provided.\n   SELL transactions are based on NET amount from Account Statements.\n   Fees and commissions are not separately extracted.\n   For detailed fee breakdown, include Trade Confirmation PDFs.\n  Obtainable at: https://us.etrade.com/etx/pxy/accountdocs#/documents (select 'Trade Confirmation' type)".to_string();
+        println!("\n{warning}\n");
+        log::info!("No Trade Confirmation PDFs provided; using Account Statement net amounts for sold transactions");
+        Some(warning.to_string())
+    } else {
+        None
+    };
+
+    let sold_transactions_ex = build_sold_transactions_ex(sold_transactions, trade_confirmations)?;
+
+    let mut gain_to_sold_matches: Vec<(usize, usize)> = vec![];
+    let qty_delta = Decimal::from_f64(0.001).unwrap_or(Decimal::ZERO);
+
+    let mut gains_by_day: HashMap<chrono::NaiveDate, Vec<usize>> = HashMap::new();
+    for (gain_idx, (_acquisition_date, tr_date, _cost_basis, _adjusted_cost_basis, _inc, quantity)) in
+        gains_and_losses.iter().enumerate()
+    {
+        let trade_date = chrono::NaiveDate::parse_from_str(tr_date, "%m/%d/%Y")
+            .expect_and_log(&format!("Unable to parse trade date: {tr_date}"));
+        if *quantity <= 0.0 {
+            return Err(format!(
+                "\n\nERROR: Gain&Losses quantity must be positive for trade date {tr_date}.\n"
+            ));
+        }
+        gains_by_day.entry(trade_date).or_insert(vec![]).push(gain_idx);
+    }
+
+    let mut sold_by_day: HashMap<chrono::NaiveDate, Vec<usize>> = HashMap::new();
+    for (sold_idx, sold_ex) in sold_transactions_ex.iter().enumerate() {
+        let trade_date_pdf = chrono::NaiveDate::parse_from_str(&sold_ex.trade_date, "%m/%d/%y")
+            .expect_and_log(&format!("Unable to parse trade date: {}", sold_ex.trade_date));
+        sold_by_day.entry(trade_date_pdf).or_insert(vec![]).push(sold_idx);
+    }
+
+    fn solve_day_knapsack(
+        gain_indices: &Vec<usize>,
+        sold_indices: &Vec<usize>,
+        gains_and_losses: &Vec<(String, String, f32, f32, f32, f32)>,
+        sold_transactions_ex: &Vec<SoldTransactionEx>,
+        qty_delta: Decimal,
+    ) -> Option<Vec<(usize, usize)>> {
+        fn dfs(
+            pos: usize,
+            ordered_gain_indices: &Vec<usize>,
+            sold_indices: &Vec<usize>,
+            gain_qty: &HashMap<usize, Decimal>,
+            remaining_per_sold: &mut HashMap<usize, Decimal>,
+            assignments: &mut Vec<(usize, usize)>,
+            qty_delta: Decimal,
+        ) -> bool {
+            if pos >= ordered_gain_indices.len() {
+                return sold_indices.iter().all(|s| {
+                    remaining_per_sold
+                        .get(s)
+                        .map(|r| r.abs() <= qty_delta)
+                        .unwrap_or(false)
+                });
+            }
+
+            let gain_idx = ordered_gain_indices[pos];
+            let qty = *gain_qty.get(&gain_idx).unwrap_or(&Decimal::ZERO);
+
+            let mut candidate_sold_indices: Vec<usize> = sold_indices
+                .iter()
+                .copied()
+                .filter(|sold_idx| {
+                    let rem = *remaining_per_sold.get(sold_idx).unwrap_or(&Decimal::ZERO);
+                    rem + qty_delta >= qty
+                })
+                .collect();
+
+            candidate_sold_indices.sort_by(|a, b| {
+                let ra = *remaining_per_sold.get(a).unwrap_or(&Decimal::ZERO);
+                let rb = *remaining_per_sold.get(b).unwrap_or(&Decimal::ZERO);
+                rb.cmp(&ra)
+            });
+
+            for sold_idx in candidate_sold_indices {
+                let rem = *remaining_per_sold.get(&sold_idx).unwrap_or(&Decimal::ZERO);
+                remaining_per_sold.insert(sold_idx, rem - qty);
+                assignments.push((gain_idx, sold_idx));
+
+                if dfs(
+                    pos + 1,
+                    ordered_gain_indices,
+                    sold_indices,
+                    gain_qty,
+                    remaining_per_sold,
+                    assignments,
+                    qty_delta,
+                ) {
+                    return true;
+                }
+
+                assignments.pop();
+                remaining_per_sold.insert(sold_idx, rem);
+            }
+
+            false
+        }
+
+        let mut gain_qty: HashMap<usize, Decimal> = HashMap::new();
+        for gain_idx in gain_indices {
+            gain_qty.insert(
+                *gain_idx,
+                Decimal::from_f32(gains_and_losses[*gain_idx].5).unwrap_or(Decimal::ZERO),
+            );
+        }
+
+        let mut remaining_per_sold: HashMap<usize, Decimal> = HashMap::new();
+        for sold_idx in sold_indices {
+            remaining_per_sold.insert(
+                *sold_idx,
+                Decimal::from_f64(sold_transactions_ex[*sold_idx].quantity).unwrap_or(Decimal::ZERO),
+            );
+        }
+
+        let mut ordered_gain_indices = gain_indices.clone();
+        ordered_gain_indices.sort_by(|a, b| {
+            let qa = *gain_qty.get(a).unwrap_or(&Decimal::ZERO);
+            let qb = *gain_qty.get(b).unwrap_or(&Decimal::ZERO);
+            qb.cmp(&qa)
+        });
+
+        let mut assignments: Vec<(usize, usize)> = vec![];
+        if dfs(
+            0,
+            &ordered_gain_indices,
+            sold_indices,
+            &gain_qty,
+            &mut remaining_per_sold,
+            &mut assignments,
+            qty_delta,
+        ) {
+            Some(assignments)
+        } else {
+            None
+        }
+    }
+
+    let mut all_days: Vec<chrono::NaiveDate> = gains_by_day
+        .keys()
+        .chain(sold_by_day.keys())
+        .cloned()
+        .collect();
+    all_days.sort();
+    all_days.dedup();
+
+    for day in all_days {
+        let day_gains = gains_by_day.get(&day).cloned().unwrap_or(vec![]);
+        let day_sold = sold_by_day.get(&day).cloned().unwrap_or(vec![]);
+
+        let total_gain_qty = day_gains.iter().fold(Decimal::ZERO, |acc, gain_idx| {
+            acc + Decimal::from_f32(gains_and_losses[*gain_idx].5).unwrap_or(Decimal::ZERO)
+        });
+        let total_sold_qty = day_sold.iter().fold(Decimal::ZERO, |acc, sold_idx| {
+            acc + Decimal::from_f64(sold_transactions_ex[*sold_idx].quantity).unwrap_or(Decimal::ZERO)
+        });
+
+        if (total_gain_qty - total_sold_qty).abs() > qty_delta {
+            return Err(format!(
+                "\n\nERROR: Same-day quantity mismatch between Gain&Losses XLSX and PDF sold transactions.\n\
+trade_date: {}\n\
+G&L total quantity: {}\n\
+PDF total quantity: {}\n",
+                day.format("%m/%d/%Y"),
+                total_gain_qty,
+                total_sold_qty
+            ));
+        }
+
+        let mut day_matches = solve_day_knapsack(
+            &day_gains,
+            &day_sold,
+            gains_and_losses,
+            &sold_transactions_ex,
+            qty_delta,
+        )
+        .ok_or(format!(
+            "\n\nERROR: Unable to allocate Gain&Losses rows into same-day sold transactions by quantity.\n\
+trade_date: {}\n",
+            day.format("%m/%d/%Y")
+        ))?;
+
+        gain_to_sold_matches.append(&mut day_matches);
+    }
+
+    gain_to_sold_matches.sort_by_key(|(gain_idx, _)| *gain_idx);
+
+    let mut total_gl_per_sold_index: HashMap<usize, Decimal> = HashMap::new();
+    for (gain_idx, sold_index) in &gain_to_sold_matches {
+        let gl_inc = Decimal::from_f32(gains_and_losses[*gain_idx].4).unwrap_or(Decimal::ZERO);
+        *total_gl_per_sold_index
+            .entry(*sold_index)
+            .or_insert(Decimal::ZERO) += gl_inc;
+    }
+
     // iterate through all sold transactions and update it with needed info
-    for (acquisition_date, tr_date, cost_basis, _, inc) in gains_and_losses {
+    for (gain_idx, sold_index) in gain_to_sold_matches {
+        let (acquisition_date, tr_date, cost_basis, _, inc, _quantity) = &gains_and_losses[gain_idx];
         // match trade date and gross with principal and trade date of  trade confirmation
 
         log::info!("Reconstructing G&L sold transaction: trade date: {tr_date}, acquisition date: {acquisition_date}, cost basis: {cost_basis}, income: {inc}");
-        let trade_date = chrono::NaiveDate::parse_from_str(&tr_date, "%m/%d/%Y")
-            .expect_and_log(&format!("Unable to parse trade date: {tr_date}"));
+        let sold_ex = &sold_transactions_ex[sold_index];
+        let settlement_date = &sold_ex.settlement_date;
+        let symbol = &sold_ex.symbol;
 
-        let (_, settlement_date, _, _, _, symbol) = sold_transactions.iter().find(|(trade_dt, _, _, _, income, _)|{
-            log::info!("Candidate Sold transaction from PDF: trade_date: {trade_dt} income: {income}");
-            let trade_date_pdf = chrono::NaiveDate::parse_from_str(&trade_dt, "%m/%d/%y").expect_and_log(&format!("Unable to parse trade date: {trade_dt}"));
-            trade_date ==  trade_date_pdf
-        }).ok_or(format!("\n\nERROR: Sold transaction in Gain&Losses:\n (trade_date: {tr_date}, acquisition date: {acquisition_date}, cost basis: {cost_basis}, income: {inc}) exist,\n but corressponding data from PDF document is missing. You can download account statements PDF documents at:\n
-            https://edoc.etrade.com/e/t/onlinedocs/docsearch?doc_type=stmt\n\n"))?;
+        let (mut adjusted_income, mut adjusted_cost_basis, mut adjusted_fees) = (*inc, *cost_basis, 0.0f32);
+        if sold_ex.has_trade_confirmation {
+            let gl_total_for_sold = *total_gl_per_sold_index
+                .get(&sold_index)
+                .unwrap_or(&Decimal::ZERO);
+            if gl_total_for_sold > Decimal::ZERO {
+                let ratio = Decimal::from_f32(*inc).unwrap_or(Decimal::ZERO) / gl_total_for_sold;
+                let proportional_net = sold_ex.net_amount * ratio;
+                let proportional_fee = (sold_ex.commission + sold_ex.fee) * ratio;
+
+                // adjusted_income is the net proceeds (what the seller receives)
+                adjusted_income = proportional_net.to_f32().unwrap_or(*inc);
+                // fees separately for display
+                adjusted_fees = proportional_fee.to_f32().unwrap_or(0.0);
+                // cost_basis still includes fees for tax purposes
+                adjusted_cost_basis = (Decimal::from_f32(*cost_basis).unwrap_or(Decimal::ZERO)
+                    + proportional_fee)
+                    .to_f32()
+                    .unwrap_or(*cost_basis);
+
+                log::info!(
+                    "Applied Trade Confirmation enrichment to sold trade: qty={}, price={:.4}, ratio={}, gross={}, fee={}",
+                    sold_ex.quantity,
+                    sold_ex.price,
+                    ratio,
+                    proportional_net + proportional_fee,
+                    proportional_fee
+                );
+            }
+        }
 
         detailed_sold_transactions.push((
             chrono::NaiveDate::parse_from_str(&tr_date, "%m/%d/%Y")
@@ -151,13 +547,20 @@ pub fn reconstruct_sold_transactions(
                 ))
                 .format("%m/%d/%y")
                 .to_string(),
-            *inc,
-            *cost_basis,
+            adjusted_income,
+            adjusted_cost_basis,
+            adjusted_fees,
             symbol.clone(),
         ));
     }
 
-    Ok(detailed_sold_transactions)
+    // Seems matching was OK. Double check we have the same totals in all flavors of PDFs and XLSX
+    // Doing it only now, not at the beginning, to have a better contextual help on missed match in the logic above.
+    sanity_check_pdf_vs_gl_totals(sold_transactions, gains_and_losses)?;
+    sanity_check_trade_confirmations(trade_confirmations, gains_and_losses)?;
+
+
+    Ok((detailed_sold_transactions, missing_tc_warning))
 }
 
 pub fn create_detailed_revolut_transactions(
@@ -267,12 +670,12 @@ pub fn create_detailed_div_transactions(
 //    pub exchange_rate_acquisition_date: String,
 //    pub exchange_rate_acquisition: f32,
 pub fn create_detailed_sold_transactions(
-    transactions: Vec<(String, String, String, f32, f32, Option<String>)>,
+    transactions: Vec<(String, String, String, f32, f32, f32, Option<String>)>,
     dates: &std::collections::HashMap<crate::Exchange, Option<(String, f32)>>,
 ) -> Result<Vec<SoldTransaction>, &str> {
     let mut detailed_transactions: Vec<SoldTransaction> = Vec::new();
     transactions.iter().for_each(
-        |(trade_date, settlement_date, acquisition_date, income, cost_basis, symbol)| {
+        |(trade_date, settlement_date, acquisition_date, income, cost_basis, fees, symbol)| {
             let (exchange_rate_trade_date, exchange_rate_trade) = dates
                 [&crate::Exchange::USD(trade_date.clone())]
                 .clone()
@@ -288,6 +691,7 @@ pub fn create_detailed_sold_transactions(
                 acquisition_date: acquisition_date.clone(),
                 income_us: *income,
                 cost_basis: *cost_basis,
+                fees: *fees,
                 exchange_rate_trade_date,
                 exchange_rate_trade,
                 exchange_rate_acquisition_date,
@@ -335,6 +739,7 @@ pub fn create_detailed_revolut_sold_transactions(
                 acquisition_date: acquired_date.clone(),
                 income_us: (gross_income.value() as f32),
                 cost_basis: (cost_basis.value() as f32),
+                fees: 0.0,
                 exchange_rate_trade_date,
                 exchange_rate_trade,
                 exchange_rate_acquisition_date,
@@ -432,6 +837,55 @@ mod tests {
 
     fn round4(val: f64) -> f64 {
         (val * 10_000.0).round() / 10_000.0
+    }
+
+    fn add_missing_gl_quantity(
+        gains: &Vec<(String, String, f32, f32, f32)>,
+        sold: &Vec<(String, String, f32, f32, f32, Option<String>)>,
+    ) -> Vec<(String, String, f32, f32, f32, f32)> {
+        let mut sold_qty_by_day: HashMap<chrono::NaiveDate, f32> = HashMap::new();
+        for (trade_date, _settlement_date, qty, _price, _income, _symbol) in sold {
+            let day = chrono::NaiveDate::parse_from_str(trade_date, "%m/%d/%y")
+                .expect_and_log(&format!("Unable to parse trade date: {trade_date}"));
+            *sold_qty_by_day.entry(day).or_insert(0.0) += *qty;
+        }
+
+        let mut gains_by_day: HashMap<chrono::NaiveDate, Vec<usize>> = HashMap::new();
+        for (idx, (_acq_date, sold_date, _acq_cost, _cost_basis, _proceeds)) in gains.iter().enumerate() {
+            let day = chrono::NaiveDate::parse_from_str(sold_date, "%m/%d/%Y")
+                .expect_and_log(&format!("Unable to parse sold date: {sold_date}"));
+            gains_by_day.entry(day).or_insert(vec![]).push(idx);
+        }
+
+        let mut out: Vec<(String, String, f32, f32, f32, f32)> = gains
+            .iter()
+            .map(|(a, b, c, d, e)| (a.clone(), b.clone(), *c, *d, *e, 0.0))
+            .collect();
+
+        for (day, gain_indices) in gains_by_day {
+            let day_sold_qty = *sold_qty_by_day.get(&day).unwrap_or(&0.0);
+            if day_sold_qty <= 0.0 {
+                continue;
+            }
+
+            let day_total_proceeds: f32 = gain_indices.iter().map(|idx| gains[*idx].4).sum();
+            if day_total_proceeds <= 0.0 {
+                continue;
+            }
+
+            let mut assigned_sum = 0.0_f32;
+            for (i, gain_idx) in gain_indices.iter().enumerate() {
+                if i + 1 == gain_indices.len() {
+                    out[*gain_idx].5 = (day_sold_qty - assigned_sum).max(0.0);
+                } else {
+                    let qty = day_sold_qty * (gains[*gain_idx].4 / day_total_proceeds);
+                    out[*gain_idx].5 = qty;
+                    assigned_sum += qty;
+                }
+            }
+        }
+
+        out
     }
 
     #[test]
@@ -552,6 +1006,7 @@ mod tests {
                 acquisition_date: "01/01/21".to_string(),
                 income_us: 20.0,
                 cost_basis: 20.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "02/28/21".to_string(),
                 exchange_rate_trade: 2.5,
                 exchange_rate_acquisition_date: "02/28/21".to_string(),
@@ -564,6 +1019,7 @@ mod tests {
                 acquisition_date: "01/01/19".to_string(),
                 income_us: 25.0,
                 cost_basis: 10.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "05/31/21".to_string(),
                 exchange_rate_trade: 4.0,
                 exchange_rate_acquisition_date: "12/30/18".to_string(),
@@ -576,6 +1032,7 @@ mod tests {
                 acquisition_date: "01/01/19".to_string(),
                 income_us: 20.0,
                 cost_basis: 0.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "05/31/21".to_string(),
                 exchange_rate_trade: 4.0,
                 exchange_rate_acquisition_date: "12/30/18".to_string(),
@@ -941,6 +1398,7 @@ mod tests {
                 acquisition_date: "11/20/23".to_string(),
                 income_us: 5804.62,
                 cost_basis: 5000.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "12/06/24".to_string(),
                 exchange_rate_trade: 3.0,
                 exchange_rate_acquisition_date: "11/19/23".to_string(),
@@ -953,13 +1411,14 @@ mod tests {
 
     #[test]
     fn test_create_detailed_sold_transactions() -> Result<(), String> {
-        let parsed_transactions: Vec<(String, String, String, f32, f32, Option<String>)> = vec![
+        let parsed_transactions: Vec<(String, String, String, f32, f32, f32, Option<String>)> = vec![
             (
                 "03/01/21".to_string(),
                 "03/03/21".to_string(),
                 "01/01/21".to_string(),
                 20.0,
                 20.0,
+                0.0,  // fees
                 Some("INTEL CORP".to_owned()),
             ),
             (
@@ -968,6 +1427,7 @@ mod tests {
                 "01/01/19".to_string(),
                 25.0,
                 10.0,
+                0.0,  // fees
                 Some("INTEL CORP".to_owned()),
             ),
         ];
@@ -1019,6 +1479,7 @@ mod tests {
                     acquisition_date: "01/01/21".to_string(),
                     income_us: 20.0,
                     cost_basis: 20.0,
+                    fees: 0.0,
                     exchange_rate_trade_date: "02/28/21".to_string(),
                     exchange_rate_trade: 2.0,
                     exchange_rate_acquisition_date: "02/28/21".to_string(),
@@ -1031,6 +1492,7 @@ mod tests {
                     acquisition_date: "01/01/19".to_string(),
                     income_us: 25.0,
                     cost_basis: 10.0,
+                    fees: 0.0,
                     exchange_rate_trade_date: "06/03/21".to_string(),
                     exchange_rate_trade: 3.0,
                     exchange_rate_acquisition_date: "12/30/18".to_string(),
@@ -1073,9 +1535,10 @@ mod tests {
         let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
 
         let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32)> = vec![];
+        let empty_trade_confirmations = vec![];
 
-        let detailed_sold_transactions =
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses)?;
+        let (detailed_sold_transactions, _) =
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations)?;
         // 1. trade date
         // 2. settlement date
         // 3. date of purchase
@@ -1123,14 +1586,16 @@ mod tests {
             ),
         ];
 
-        let detailed_sold_transactions =
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses)?;
+        let empty_trade_confirmations = vec![];
+        let (detailed_sold_transactions, _) =
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations)?;
 
         // 1. trade date
         // 2. settlement date
         // 3. date of purchase
-        // 4. net income
+        // 4. gross income (or net if no confirmations)
         // 5. cost cost basis
+        // 6. fees
         assert_eq!(
             detailed_sold_transactions,
             vec![
@@ -1140,6 +1605,7 @@ mod tests {
                     "01/01/19".to_string(),
                     24.8,
                     10.0,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
                 (
@@ -1148,6 +1614,7 @@ mod tests {
                     "01/01/21".to_string(),
                     19.8,
                     20.0,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
             ]
@@ -1193,14 +1660,16 @@ mod tests {
             ),
         ];
 
-        let detailed_sold_transactions =
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses)?;
+        let empty_trade_confirmations = vec![];
+        let (detailed_sold_transactions, _) =
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations)?;
 
         // 1. trade date
         // 2. settlement date
         // 3. date of purchase
-        // 4. net income
+        // 4. gross income (or net if no confirmations)
         // 5. cost cost basis
+        // 6. fees
         assert_eq!(
             detailed_sold_transactions,
             vec![
@@ -1210,6 +1679,7 @@ mod tests {
                     "01/01/19".to_string(),
                     24.8,
                     10.0,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
                 (
@@ -1218,6 +1688,7 @@ mod tests {
                     "01/01/21".to_string(),
                     19.8,
                     20.0,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
             ]
@@ -1261,8 +1732,9 @@ mod tests {
             ),
         ];
 
+        let empty_trade_confirmations = vec![];
         assert_eq!(
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses)
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations)
                 .is_ok(),
             false
         );
@@ -1320,8 +1792,9 @@ mod tests {
             ),
         ];
 
-        let detailed_sold_transactions =
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses)?;
+        let empty_trade_confirmations = vec![];
+        let (detailed_sold_transactions, _) =
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations)?;
 
         assert_eq!(
             detailed_sold_transactions,
@@ -1332,6 +1805,7 @@ mod tests {
                     "08/19/21".to_string(),
                     2711.0954,
                     4336.4874,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
                 (
@@ -1339,6 +1813,7 @@ mod tests {
                     "12/23/22".to_string(),
                     "05/03/21".to_string(),
                     2046.61285,
+                    0.0,
                     0.0,
                     Some("INTEL CORP".to_owned())
                 ),
@@ -1348,6 +1823,7 @@ mod tests {
                     "08/19/22".to_string(),
                     3986.9048,
                     5045.6257,
+                    0.0,
                     Some("INTEL CORP".to_owned())
                 ),
                 (
@@ -1355,6 +1831,7 @@ mod tests {
                     "12/23/22".to_string(),
                     "05/02/22".to_string(),
                     2285.82733,
+                    0.0,
                     0.0,
                     Some("INTEL CORP".to_owned())
                 ),
@@ -1386,9 +1863,478 @@ mod tests {
 
         let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32)> = vec![];
 
+        let empty_trade_confirmations = vec![];
         let result =
-            reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gains_and_losses);
+            reconstruct_sold_transactions(&parsed_sold_transactions, &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions), &empty_trade_confirmations);
         assert_eq!( result , Err("\n\nERROR: Sold transaction detected, but corressponding Gain&Losses document is missing. Please download Gain&Losses  XLSX document at:\n
             https://us.etrade.com/etx/sp/stockplan#/myAccount/gainsLosses\n\n".to_string()));
     }
+
+    #[test]
+    fn test_trade_confirmation_fees_increase_cost_basis_in_detailed_sold() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "06/01/21".to_string(),
+                "06/03/21".to_string(),
+                1.0,
+                25.0,
+                24.8,
+                Some("INTEL CORP".to_owned()),
+            ),
+        ];
+
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32)> = vec![
+            (
+                "01/01/2019".to_string(),
+                "06/01/2021".to_string(),
+                10.0,
+                10.0,
+                24.8,
+            ),
+        ];
+
+        // net amount should replace income, while commission+fee should be added to cost basis
+        let trade_confirmations = vec![(
+            "06/01/21".to_string(),
+            "06/03/21".to_string(),
+            1,
+            Decimal::new(2510, 2),
+            Decimal::new(2510, 2),
+            Decimal::new(20, 2),
+            Decimal::new(10, 2),
+            Decimal::new(2480, 2),
+        )];
+
+        let (reconstructed, _warning) = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions),
+            &trade_confirmations,
+        )?;
+
+        let mut dates: std::collections::HashMap<crate::Exchange, Option<(String, f32)>> =
+            std::collections::HashMap::new();
+        dates.insert(
+            crate::Exchange::USD("06/01/21".to_owned()),
+            Some(("05/31/21".to_owned(), 4.0)),
+        );
+        dates.insert(
+            crate::Exchange::USD("01/01/19".to_owned()),
+            Some(("12/30/18".to_owned(), 3.0)),
+        );
+
+        let detailed = create_detailed_sold_transactions(reconstructed, &dates)
+            .map_err(|e| format!("Unable to create detailed sold transactions: {e}"))?;
+
+        assert_eq!(detailed.len(), 1);
+        assert!((detailed[0].income_us - 24.8).abs() < 0.0001);
+        assert!((detailed[0].cost_basis - 10.3).abs() < 0.0001);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_trade_confirmation_matches_when_date_padding_differs() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "2/12/25".to_string(),
+                "2/13/25".to_string(),
+                89.0,
+                10.0,
+                889.0,
+                Some("INTEL CORP".to_owned()),
+            ),
+        ];
+
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32)> = vec![
+            (
+                "01/01/2020".to_string(),
+                "02/12/2025".to_string(),
+                500.0,
+                500.0,
+                889.0,
+            ),
+        ];
+
+        let trade_confirmations = vec![(
+            "02/12/25".to_string(),
+            "02/13/25".to_string(),
+            89,
+            Decimal::new(8920, 2),
+            Decimal::new(8920, 2),
+            Decimal::new(20, 2),
+            Decimal::new(10, 2),
+            Decimal::new(88900, 2),
+        )];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions),
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 1);
+        assert!((result.0[0].3 - 889.0).abs() < 0.0001);
+        assert!((result.0[0].4 - 500.3).abs() < 0.0001);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_empty_sold_transactions() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32)> = vec![];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &add_missing_gl_quantity(&parsed_gains_and_losses, &parsed_sold_transactions),
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 0);
+        assert_eq!(result.1, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_quantity_zero_error() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "1/2/25".to_string(),
+                "1/3/25".to_string(),
+                100.0,
+                10.0,
+                1000.0,
+                Some("AAPL".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "1/1/2020".to_string(),
+                "1/2/2025".to_string(),
+                500.0,
+                500.0,
+                1000.0,
+                0.0, // zero quantity should fail
+            ),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        );
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("quantity must be positive"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_quantity_mismatch_error() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "1/2/25".to_string(),
+                "1/3/25".to_string(),
+                100.0,  // sell 100 shares
+                10.0,
+                1000.0,
+                Some("AAPL".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "1/1/2020".to_string(),
+                "1/2/2025".to_string(),
+                500.0,
+                500.0,
+                1000.0,
+                50.0,  // G&L only shows 50 shares - mismatch!
+            ),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("Same-day quantity mismatch") || err_msg.contains("Unable to allocate"));
+        assert!(err_msg.contains("1/2/2025") || err_msg.contains("01/02/2025"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_very_small_quantities() -> Result<(), String> {
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "3/15/25".to_string(),
+                "3/17/25".to_string(),
+                0.001,  // fractional shares
+                50000.0,
+                50.0,
+                Some("AMZN".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "6/1/2024".to_string(),
+                "3/15/2025".to_string(),
+                45.0,
+                45.0,
+                50.0,
+                0.001,  // matching fractional quantity
+            ),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 1);
+        assert!((result.0[0].3 - 50.0).abs() < 0.01);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_decimal_precision_allocation() -> Result<(), String> {
+        // Test that proportional allocation maintains precision with Decimal math
+        // Total proceeds: 6172.80 + 6172.80 = 12345.60
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "5/10/25".to_string(),
+                "5/12/25".to_string(),
+                100.0,
+                123.456,
+                12345.60,  // This matches total G&L proceeds
+                Some("GOOGL".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "3/1/2024".to_string(),
+                "5/10/2025".to_string(),
+                6000.0,
+                6000.0,
+                6172.80,  // 50% of total
+                50.0,
+            ),
+            (
+                "4/1/2024".to_string(),
+                "5/10/2025".to_string(),
+                6173.0,
+                6173.0,
+                6172.80,  // 50% of total
+                50.0,
+            ),
+        ];
+        
+        let trade_confirmations = vec![(
+            "05/10/25".to_string(),
+            "05/12/25".to_string(),
+            100,
+            Decimal::new(123456, 2),  // $123.456 per share
+            Decimal::new(1234560, 2), // principal
+            Decimal::new(2000, 2),    // $20 commission
+            Decimal::new(1000, 2),    // $10 fee
+            Decimal::new(1234560, 2), // net amount = total proceeds (simplified)
+        )];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 2);
+        // Each G&L row should get proportional allocation
+        // Income should be 6172.80 (proportional net) for each
+        assert!((result.0[0].3 - 6172.80).abs() < 0.01);
+        assert!((result.0[1].3 - 6172.80).abs() < 0.01);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_multiple_symbols_same_day() -> Result<(), String> {
+        // Note: Current design is day-scoped, not symbol-scoped
+        // This tests that same-day matching works across different symbols
+        // Important: PDF total proceeds MUST equal G&L total proceeds
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "6/1/25".to_string(),
+                "6/3/25".to_string(),
+                50.0,
+                100.0,
+                5000.0,  // AAPL: 50 shares * $100
+                Some("AAPL".to_owned()),
+            ),
+            (
+                "6/1/25".to_string(),
+                "6/3/25".to_string(),
+                50.0,
+                100.0,  // same price
+                5000.0,  // MSFT: 50 shares * $100
+                Some("MSFT".to_owned()),
+            ),
+        ];
+        // Total PDF proceeds: 5000 + 5000 = 10000
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "1/1/2024".to_string(),
+                "6/1/2025".to_string(),
+                1000.0,
+                1000.0,
+                3000.0,  // AAPL first lot
+                25.0,
+            ),
+            (
+                "2/1/2024".to_string(),
+                "6/1/2025".to_string(),
+                2000.0,
+                2000.0,
+                2000.0,  // AAPL second lot
+                25.0,
+            ),
+            (
+                "3/1/2024".to_string(),
+                "6/1/2025".to_string(),
+                5000.0,
+                5000.0,
+                5000.0,  // MSFT
+                50.0,
+            ),
+        ];
+        // Total G&L proceeds: 3000 + 2000 + 5000 = 10000 ✓ matches PDF
+
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 3);
+        // Verify all 3 G&L rows are matched
+        assert!(result.0.iter().all(|r| r.6.is_some()));
+        // Check that proceeds were preserved
+        assert!((result.0[0].3 - 3000.0).abs() < 1e-4);
+        assert!((result.0[1].3 - 2000.0).abs() < 1e-4);
+        assert!((result.0[2].3 - 5000.0).abs() < 1e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_allocation_cannot_be_satisfied() -> Result<(), String> {
+        // Test infeasible knapsack: bought 10, trying to sell 100
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "7/5/25".to_string(),
+                "7/7/25".to_string(),
+                100.0,  // trying to sell 100
+                50.0,
+                5000.0,
+                Some("TSLA".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "1/15/2024".to_string(),
+                "7/5/2025".to_string(),
+                10.0,
+                10.0,
+                5000.0,
+                10.0,  // only 10 shares bought - impossible to sell 100
+            ),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        // Either quantity mismatch or unable to allocate
+        assert!(
+            err_msg.contains("mismatch") || err_msg.contains("Unable to allocate"),
+            "Expected error message to mention mismatch or allocation failure, got: {err_msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_date_normalization_consistency() -> Result<(), String> {
+        // Ensure consistent date handling across different padding styles
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            ("8/9/25".to_string(), "8/10/25".to_string(), 30.0, 75.0, 2250.0, Some("IBM".to_owned())),
+            ("08/09/25".to_string(), "8/11/25".to_string(), 20.0, 75.0, 1500.0, Some("IBM".to_owned())),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            ("10/1/2023".to_string(), "8/9/2025".to_string(), 100.0, 100.0, 2250.0, 30.0),
+            ("11/1/2023".to_string(), "8/9/2025".to_string(), 200.0, 200.0, 1500.0, 20.0),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 2);
+        // Both should match despite different padding in inputs
+        assert!((result.0[0].3 - 2250.0).abs() < 1e-4);
+        assert!((result.0[1].3 - 1500.0).abs() < 1e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconstruction_missing_trade_confirmation_warning() -> Result<(), String> {
+        // Verify warning is returned when no trade confirmations provided
+        let parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![
+            (
+                "9/1/25".to_string(),
+                "9/3/25".to_string(),
+                25.0,
+                150.0,
+                3750.0,
+                Some("META".to_owned()),
+            ),
+        ];
+        let parsed_gains_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![
+            (
+                "4/1/2024".to_string(),
+                "9/1/2025".to_string(),
+                800.0,
+                800.0,
+                3750.0,
+                25.0,
+            ),
+        ];
+        let trade_confirmations = vec![];
+
+        let result = reconstruct_sold_transactions(
+            &parsed_sold_transactions,
+            &parsed_gains_and_losses,
+            &trade_confirmations,
+        )?;
+
+        assert_eq!(result.0.len(), 1);
+        assert!(result.1.is_some());
+        let warning_msg = result.1.unwrap();
+        assert!(warning_msg.contains("Trade Confirmation"));
+        assert!(warning_msg.contains("Fees"));
+        Ok(())
+    }
 }
+
+

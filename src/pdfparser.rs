@@ -4,6 +4,13 @@
 use pdf::file::File;
 use pdf::object::PageRc;
 use pdf::primitive::Primitive;
+use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::str::FromStr;
+
+use lopdf::content::Content;
+use lopdf::{Dictionary as LoDictionary, Document as LoDocument, Object as LoObject, ObjectId};
+use rust_decimal::Decimal;
 
 pub use crate::logging::ResultExt;
 
@@ -12,6 +19,7 @@ enum StatementType {
     UnknownDocument,
     BrokerageStatement,
     AccountStatement,
+    TradeConfirmation,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -254,20 +262,26 @@ fn create_sold_2_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<
     sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Amount Sold
 }
 
-fn create_trade_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<dyn Entry>>) {
+fn create_trade_parsing_sequence(sequence: &mut VecDeque<Box<dyn Entry>>) {
     sequence.push_back(Box::new(DateEntry { val: String::new() })); // Trade date
     sequence.push_back(Box::new(DateEntry { val: String::new() })); // Settlement date
-    sequence.push_back(Box::new(I32Entry { val: 0 })); // MKT /
-    sequence.push_back(Box::new(I32Entry { val: 0 })); // / CPT
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
-        patterns: vec!["INTC".to_owned()],
+        patterns: vec![],
+    })); // MKT /
+    sequence.push_back(Box::new(StringEntry {
+        val: String::new(),
+        patterns: vec![],
+    })); // / CPT
+    sequence.push_back(Box::new(StringEntry {
+        val: String::new(),
+        patterns: vec![],
     }));
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
-        patterns: vec!["SELL".to_owned()],
+        patterns: vec!["SELL".to_owned(), "BUY".to_owned()],
     }));
-    sequence.push_back(Box::new(I32Entry { val: 0 })); // Quantity
+    sequence.push_back(Box::new(F32Entry { val: 0.0 })); // Quantity
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["$".to_owned()],
@@ -275,29 +289,13 @@ fn create_trade_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<d
     sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<price>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
-        patterns: vec!["Stock".to_owned()],
-    }));
-    sequence.push_back(Box::new(StringEntry {
-        val: String::new(),
-        patterns: vec!["Plan".to_owned()],
-    }));
-    sequence.push_back(Box::new(StringEntry {
-        val: String::new(),
         patterns: vec!["PRINCIPAL".to_owned()],
     }));
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["$".to_owned()],
-    })); // $...
+    }));
     sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<principal>
-    sequence.push_back(Box::new(StringEntry {
-        val: String::new(),
-        patterns: vec!["INTEL".to_owned()],
-    }));
-    sequence.push_back(Box::new(StringEntry {
-        val: String::new(),
-        patterns: vec!["CORP".to_owned()],
-    }));
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
         patterns: vec!["COMMISSION".to_owned()],
@@ -309,7 +307,7 @@ fn create_trade_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<d
     sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<commission>
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
-        patterns: vec!["FEE".to_owned()],
+        patterns: vec!["FEE".to_owned(), "FEES".to_owned()],
     }));
     sequence.push_back(Box::new(StringEntry {
         val: String::new(),
@@ -329,6 +327,675 @@ fn create_trade_parsing_sequence(sequence: &mut std::collections::VecDeque<Box<d
         patterns: vec!["$".to_owned()],
     })); // $...
     sequence.push_back(Box::new(F32Entry { val: 0.0 })); // ..<net amount>
+}
+
+fn yield_trade_confirmation_transaction(
+    transaction: &mut std::slice::Iter<'_, Box<dyn Entry>>,
+) -> Result<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal), String> {
+    let trade_date = transaction
+        .next()
+        .unwrap()
+        .getdate()
+        .ok_or("Error parsing trade confirmation: missing trade date")?;
+    let settlement_date = transaction
+        .next()
+        .unwrap()
+        .getdate()
+        .ok_or("Error parsing trade confirmation: missing settlement date")?;
+
+    // Skip MKT/CPT and symbol/side tokens.
+    transaction.next();
+    transaction.next();
+    transaction.next();
+    transaction.next();
+
+    let quantity = transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing quantity")?
+        .round() as i32;
+
+    transaction.next(); // $
+    let price = Decimal::from_f32_retain(transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing price")?)
+        .ok_or("Error converting price to Decimal")?;
+
+    transaction.next(); // PRINCIPAL
+    transaction.next(); // $
+    let principal = Decimal::from_f32_retain(transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing principal")?)
+        .ok_or("Error converting principal to Decimal")?;
+
+    transaction.next(); // COMMISSION
+    transaction.next(); // $
+    let commission = Decimal::from_f32_retain(transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing commission")?)
+        .ok_or("Error converting commission to Decimal")?;
+
+    transaction.next(); // FEE / FEES
+    transaction.next(); // $
+    let fee = Decimal::from_f32_retain(transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing fee")?)
+        .ok_or("Error converting fee to Decimal")?;
+
+    transaction.next(); // NET
+    transaction.next(); // AMOUNT
+    transaction.next(); // $
+    let net_amount = Decimal::from_f32_retain(transaction
+        .next()
+        .unwrap()
+        .getf32()
+        .ok_or("Error parsing trade confirmation: missing net amount")?)
+        .ok_or("Error converting net amount to Decimal")?;
+
+    Ok((
+        trade_date,
+        settlement_date,
+        quantity,
+        price,
+        principal,
+        commission,
+        fee,
+        net_amount,
+    ))
+}
+
+fn process_trade_confirmation_transaction(
+    actual_string: &pdf::primitive::PdfString,
+    processed_sequence: &mut Vec<Box<dyn Entry>>,
+    sequence: &mut VecDeque<Box<dyn Entry>>,
+    trades: &mut Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+) -> Result<(), String> {
+    let Some(mut obj) = sequence.pop_front() else {
+        return Ok(());
+    };
+
+    obj.parse(actual_string);
+
+    match obj.getstring() {
+        Some(token) => {
+            if obj.is_pattern() {
+                processed_sequence.push(obj);
+            } else if token != "$" {
+                // Keep scanning input until the next anchor token appears.
+                sequence.push_front(obj);
+            }
+        }
+        None => processed_sequence.push(obj),
+    }
+
+    if sequence.is_empty() {
+        let mut transaction = processed_sequence.iter();
+        let trade = yield_trade_confirmation_transaction(&mut transaction)?;
+        trades.push(trade);
+        processed_sequence.clear();
+    }
+
+    Ok(())
+}
+
+fn resolve_lopdf_object(doc: &LoDocument, obj: &LoObject) -> Option<LoObject> {
+    match obj {
+        LoObject::Reference(id) => doc.get_object(*id).ok().cloned(),
+        _ => Some(obj.clone()),
+    }
+}
+
+fn lopdf_dict_from_object(doc: &LoDocument, obj: &LoObject) -> Option<LoDictionary> {
+    resolve_lopdf_object(doc, obj)?.as_dict().ok().cloned()
+}
+
+fn decode_lopdf_string(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF && bytes.len() % 2 == 0 {
+        let mut out = String::new();
+        let mut i = 2usize;
+        while i < bytes.len() {
+            let v = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as u32;
+            if let Some(ch) = char::from_u32(v) {
+                out.push(ch);
+            }
+            i += 2;
+        }
+        return out;
+    }
+
+    let utf8 = String::from_utf8_lossy(bytes).into_owned();
+    if !utf8.trim().is_empty() {
+        return utf8;
+    }
+
+    bytes.iter().map(|b| *b as char).collect()
+}
+
+fn append_text_from_content(
+    doc: &LoDocument,
+    content_bytes: &[u8],
+    resources: &LoDictionary,
+    visited_forms: &mut BTreeSet<ObjectId>,
+    out: &mut String,
+) {
+    let Ok(content) = Content::decode(content_bytes) else {
+        return;
+    };
+
+    for op in &content.operations {
+        match op.operator.as_str() {
+            "Tj" => {
+                if let Some(LoObject::String(bytes, _)) = op.operands.get(0) {
+                    out.push_str(decode_lopdf_string(bytes).as_str());
+                    out.push(' ');
+                }
+            }
+            "TJ" => {
+                if let Some(LoObject::Array(items)) = op.operands.get(0) {
+                    for item in items {
+                        if let LoObject::String(bytes, _) = item {
+                            out.push_str(decode_lopdf_string(bytes).as_str());
+                        }
+                    }
+                    out.push(' ');
+                }
+            }
+            "'" | "\"" => {
+                for operand in &op.operands {
+                    if let LoObject::String(bytes, _) = operand {
+                        out.push_str(decode_lopdf_string(bytes).as_str());
+                        out.push(' ');
+                    }
+                }
+            }
+            "Do" => {
+                let Some(LoObject::Name(xobj_name)) = op.operands.get(0) else {
+                    continue;
+                };
+                let Some(xobj_obj) = resources.get(b"XObject").ok() else {
+                    continue;
+                };
+                let Some(xobj_dict) = lopdf_dict_from_object(doc, xobj_obj) else {
+                    continue;
+                };
+                let Some(target_obj) = xobj_dict.get(xobj_name).ok() else {
+                    continue;
+                };
+
+                let target_id = match target_obj {
+                    LoObject::Reference(id) => Some(*id),
+                    _ => None,
+                };
+                if let Some(id) = target_id {
+                    if visited_forms.contains(&id) {
+                        continue;
+                    }
+                    visited_forms.insert(id);
+                }
+
+                let Some(resolved) = resolve_lopdf_object(doc, target_obj) else {
+                    continue;
+                };
+                let Some(stream) = resolved.as_stream().ok() else {
+                    continue;
+                };
+
+                let subtype = stream
+                    .dict
+                    .get(b"Subtype")
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .unwrap_or(b"");
+                if subtype != b"Form" {
+                    continue;
+                }
+
+                let form_resources = stream
+                    .dict
+                    .get(b"Resources")
+                    .ok()
+                    .and_then(|o| lopdf_dict_from_object(doc, o))
+                    .unwrap_or_else(|| resources.clone());
+
+                let Ok(form_content) = stream.decompressed_content() else {
+                    continue;
+                };
+
+                append_text_from_content(doc, &form_content, &form_resources, visited_forms, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_text_with_lopdf(pdftoparse: &str) -> Result<String, String> {
+    let doc = LoDocument::load(pdftoparse)
+        .map_err(|e| format!("Unable to read PDF with low-level parser: {e}"))?;
+    let mut out = String::new();
+
+    for (_page_no, page_id) in doc.get_pages() {
+        let page_obj = doc
+            .get_object(page_id)
+            .map_err(|e| format!("Unable to access page object: {e}"))?
+            .clone();
+        let page_dict = page_obj
+            .as_dict()
+            .map_err(|_| "Unable to decode page dictionary".to_string())?
+            .clone();
+
+        let resources = page_dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| lopdf_dict_from_object(&doc, o))
+            .unwrap_or_default();
+
+        let content_bytes = doc
+            .get_page_content(page_id)
+            .map_err(|e| format!("Unable to decode page content: {e}"))?;
+
+        let mut visited_forms: BTreeSet<ObjectId> = BTreeSet::new();
+        append_text_from_content(
+            &doc,
+            &content_bytes,
+            &resources,
+            &mut visited_forms,
+            &mut out,
+        );
+        out.push(' ');
+    }
+
+    Ok(out)
+}
+
+fn extract_page_texts_with_lopdf(pdftoparse: &str) -> Result<Vec<String>, String> {
+    let doc = LoDocument::load(pdftoparse)
+        .map_err(|e| format!("Unable to read PDF with low-level parser: {e}"))?;
+    let mut pages_text = vec![];
+
+    for (_page_no, page_id) in doc.get_pages() {
+        let page_obj = doc
+            .get_object(page_id)
+            .map_err(|e| format!("Unable to access page object: {e}"))?
+            .clone();
+        let page_dict = page_obj
+            .as_dict()
+            .map_err(|_| "Unable to decode page dictionary".to_string())?
+            .clone();
+
+        let resources = page_dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| lopdf_dict_from_object(&doc, o))
+            .unwrap_or_default();
+
+        let content_bytes = doc
+            .get_page_content(page_id)
+            .map_err(|e| format!("Unable to decode page content: {e}"))?;
+
+        let mut page_out = String::new();
+        let mut visited_forms: BTreeSet<ObjectId> = BTreeSet::new();
+        append_text_from_content(
+            &doc,
+            &content_bytes,
+            &resources,
+            &mut visited_forms,
+            &mut page_out,
+        );
+
+        pages_text.push(page_out);
+    }
+
+    Ok(pages_text)
+}
+
+fn hash_normalized_page_text(page_text: &str) -> u64 {
+    let normalized = page_text
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn should_skip_duplicate_multi_transaction_page(
+    page_text: &str,
+    parsed_trade_count: usize,
+    seen_multi_transaction_page_hashes: &mut HashSet<u64>,
+) -> bool {
+    // Dedup applies only when a page yields multiple rows because some exports can include
+    // a byte-identical copy of the same multi-row page in another input file.
+    // Single-row pages are left untouched to avoid accidentally dropping legitimate trades.
+    if parsed_trade_count <= 1 {
+        return false;
+    }
+
+    let page_hash = hash_normalized_page_text(page_text);
+    if seen_multi_transaction_page_hashes.contains(&page_hash) {
+        return true;
+    }
+
+    seen_multi_transaction_page_hashes.insert(page_hash);
+    false
+}
+
+fn normalize_trade_date(date_yyyy: &str) -> Result<String, String> {
+    let parsed = chrono::NaiveDate::parse_from_str(date_yyyy, "%m/%d/%Y")
+        .map_err(|_| format!("Unable to parse trade date: {date_yyyy}"))?;
+    Ok(parsed.format("%m/%d/%y").to_string())
+}
+
+fn parse_trade_confirmation_from_text(
+    extracted_text: &str,
+) -> Result<Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>, String> {
+    let normalized_text = extracted_text
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let upper = normalized_text.to_uppercase();
+
+    let has_principal = upper.contains("PRINCIPAL");
+    let has_net_amount = upper.contains("NET AMOUNT");
+
+    if !has_principal || !has_net_amount {
+        return Err("Trade confirmation is missing required columns (PRINCIPAL, NET AMOUNT)".to_string());
+    }
+
+    // Regex with optional fee section
+    let row_re = regex::Regex::new(
+        r"(?s)(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(\d+)\s+([\d,]+(?:\.\d+)?)\s+Transaction\s+Type:\s*Sold.*?Principal\s*\$([\d,]+(?:\.\d+)?)\s*(?:Commission\s*\$([\d,]+(?:\.\d+)?)\s*)?(?:(?:Supplemental\s+)?Transaction\s+Fee\s*\$([\d,]+(?:\.\d+)?)\s*)?Net\s+Amount\s*\$([\d,]+(?:\.\d+)?)",
+    )
+    .map_err(|_| "Unable to create regex for trade confirmation row parsing".to_string())?;
+
+    let parse_money = |s: &str| -> Result<Decimal, String> {
+        let cleaned = s.replace(',', "");
+        Decimal::from_str(&cleaned)
+            .map_err(|_| format!("Unable to parse money value: {s}"))
+    };
+
+    let mut trades = vec![];
+    for cap in row_re.captures_iter(&normalized_text) {
+        let trade_date = normalize_trade_date(&cap[1])?;
+        let settlement_date = normalize_trade_date(&cap[2])?;
+        let quantity = cap[3]
+            .parse::<i32>()
+            .map_err(|_| format!("Unable to parse quantity: {}", &cap[3]))?;
+        let price = parse_money(&cap[4])?;
+        let principal = parse_money(&cap[5])?;
+        let commission = if let Some(c) = cap.get(6) {
+            parse_money(c.as_str())?
+        } else {
+            Decimal::ZERO
+        };
+        let fee = if let Some(f) = cap.get(7) {
+            parse_money(f.as_str())?
+        } else {
+            Decimal::ZERO
+        };
+        let net_amount = parse_money(&cap[8])?;
+
+        // Sanity check: principal - commission - fee should equal net_amount
+        let calculated_net = principal - commission - fee;
+        let delta = (calculated_net - net_amount).abs();
+        log::info!(
+            "Parsed trade - Trade Date: {}, Settlement Date: {}, Quantity: {}, Price: {}, Principal: {}, Commission: {}, Fee: {}, Net Amount: {}",
+            trade_date, settlement_date, quantity, price, principal, commission, fee, net_amount
+        );
+        if delta != Decimal::ZERO {
+            return Err(format!(
+                "Trade confirmation sanity check failed: principal ({}) - commission ({}) - fee ({}) = {} but net amount is {} (delta: {})",
+                principal, commission, fee, calculated_net, net_amount, delta
+            ));
+        }
+
+        trades.push((
+            trade_date,
+            settlement_date,
+            quantity,
+            price,
+            principal,
+            commission,
+            fee,
+            net_amount,
+        ));
+    }
+
+    if trades.is_empty() {
+        return Err(
+            "Trade confirmation detected, but no complete transaction rows were parsed"
+                .to_string(),
+        );
+    }
+
+    Ok(trades)
+}
+
+fn parse_trade_confirmation_lopdf(
+    pdftoparse: &str,
+    seen_multi_transaction_page_hashes: &mut HashSet<u64>,
+) -> Result<
+    (
+        Vec<(String, f32, f32)>,
+        Vec<(String, f32, f32, Option<String>)>,
+        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+    ),
+    String,
+> {
+    let mut trades = vec![];
+    let page_texts = extract_page_texts_with_lopdf(pdftoparse)?;
+    let mut found_trade_rows_on_any_page = false;
+    let mut skipped_duplicate_multi_transaction_page = false;
+
+    for (page_idx, page_text) in page_texts.iter().enumerate() {
+        match parse_trade_confirmation_from_text(page_text) {
+            Ok(mut page_trades) => {
+                found_trade_rows_on_any_page = true;
+                // Page-wise dedup prevents double counting when identical multi-row pages are
+                // present across selected files for the same run.
+                if should_skip_duplicate_multi_transaction_page(
+                    page_text,
+                    page_trades.len(),
+                    seen_multi_transaction_page_hashes,
+                ) {
+                    skipped_duplicate_multi_transaction_page = true;
+                    log::warn!(
+                        "Skipping duplicate multi-transaction trade confirmation page {} from {}",
+                        page_idx + 1,
+                        pdftoparse
+                    );
+                    continue;
+                }
+                trades.append(&mut page_trades);
+            }
+            Err(e)
+                if e.contains("missing required columns")
+                    || e.contains("no complete transaction rows were parsed") =>
+            {
+                continue;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Unable to parse trade confirmation page {}: {}",
+                    page_idx + 1,
+                    e
+                ));
+            }
+        }
+    }
+
+    if trades.is_empty() {
+        if found_trade_rows_on_any_page && skipped_duplicate_multi_transaction_page {
+            log::info!(
+                "Trade confirmation {} was fully skipped because all parsed rows were duplicates",
+                pdftoparse
+            );
+            return Ok((vec![], vec![], vec![], vec![]));
+        }
+
+        return Err(
+            "Trade confirmation detected, but no complete transaction rows were parsed"
+                .to_string(),
+        );
+    }
+
+    Ok((vec![], vec![], vec![], trades))
+}
+
+fn parse_trade_confirmation<'a, I>(
+    first_page: PageRc,
+    pages_iter: I,
+) -> Result<
+    (
+        Vec<(String, f32, f32)>,
+        Vec<(String, f32, f32, Option<String>)>,
+        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+    ),
+    String,
+>
+where
+    I: Iterator<Item = Result<PageRc, pdf::error::PdfError>>,
+{
+    let interests_transactions: Vec<(String, f32, f32)> = vec![];
+    let div_transactions: Vec<(String, f32, f32, Option<String>)> = vec![];
+    let sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
+    let mut trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
+
+    let full_date_pattern = regex::Regex::new(r"^(0?[1-9]|1[012])/(0?[1-9]|[12][0-9]|3[01])/\\d{2}$")
+        .map_err(|_| "Unable to create regular expression to parse trade confirmation date")?;
+
+    let mut sequence: VecDeque<Box<dyn Entry>> = VecDeque::new();
+    let mut processed_sequence: Vec<Box<dyn Entry>> = vec![];
+    let mut found_principal = false;
+    let mut found_commission = false;
+    let mut found_fee = false;
+    let mut found_net = false;
+    let mut found_amount = false;
+
+    let mut pages = vec![first_page];
+    for page in pages_iter {
+        pages.push(page.map_err(|_| "Unable to read PDF page when parsing trade confirmation")?);
+    }
+
+    for page in pages {
+        let Some(contents) = page.contents.as_ref() else {
+            continue;
+        };
+
+        for op in contents.operations.iter() {
+            match op.operator.as_ref() {
+                "Tj" => {
+                    if let Some(Primitive::String(actual_string)) = op.operands.get(0) {
+                        let raw_string = actual_string.clone().into_string();
+                        let rust_string = if let Ok(r) = raw_string {
+                            r.trim().to_uppercase()
+                        } else {
+                            "".to_owned()
+                        };
+                        if rust_string.is_empty() {
+                            continue;
+                        }
+
+                        if rust_string == "PRINCIPAL" {
+                            found_principal = true;
+                        } else if rust_string == "COMMISSION" {
+                            found_commission = true;
+                        } else if rust_string == "FEE" || rust_string == "FEES" {
+                            found_fee = true;
+                        } else if rust_string == "NET" {
+                            found_net = true;
+                        } else if rust_string == "AMOUNT" {
+                            found_amount = true;
+                        }
+
+                        if sequence.is_empty() && full_date_pattern.is_match(rust_string.as_str()) {
+                            create_trade_parsing_sequence(&mut sequence);
+                        }
+
+                        if !sequence.is_empty() {
+                            process_trade_confirmation_transaction(
+                                actual_string,
+                                &mut processed_sequence,
+                                &mut sequence,
+                                &mut trades,
+                            )?;
+                        }
+                    }
+                }
+                "TJ" => {
+                    if let Some(Primitive::Array(items)) = op.operands.get(0) {
+                        for item in items {
+                            if let Primitive::String(actual_string) = item {
+                                let raw_string = actual_string.clone().into_string();
+                                let rust_string = if let Ok(r) = raw_string {
+                                    r.trim().to_uppercase()
+                                } else {
+                                    "".to_owned()
+                                };
+                                if rust_string.is_empty() {
+                                    continue;
+                                }
+
+                                if rust_string == "PRINCIPAL" {
+                                    found_principal = true;
+                                } else if rust_string == "COMMISSION" {
+                                    found_commission = true;
+                                } else if rust_string == "FEE" || rust_string == "FEES" {
+                                    found_fee = true;
+                                } else if rust_string == "NET" {
+                                    found_net = true;
+                                } else if rust_string == "AMOUNT" {
+                                    found_amount = true;
+                                }
+
+                                if sequence.is_empty()
+                                    && full_date_pattern.is_match(rust_string.as_str())
+                                {
+                                    create_trade_parsing_sequence(&mut sequence);
+                                }
+
+                                if !sequence.is_empty() {
+                                    process_trade_confirmation_transaction(
+                                        actual_string,
+                                        &mut processed_sequence,
+                                        &mut sequence,
+                                        &mut trades,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !found_principal || !found_commission || !found_fee || !found_net || !found_amount {
+        return Err("Trade confirmation is missing required columns (PRINCIPAL, COMMISSION, FEE/FEES, NET, AMOUNT)".to_string());
+    }
+
+    if trades.is_empty() {
+        return Err("Trade confirmation detected, but no complete transaction rows were parsed".to_string());
+    }
+
+    Ok((
+        interests_transactions,
+        div_transactions,
+        sold_transactions,
+        trades,
+    ))
 }
 
 fn yield_sold_transaction(
@@ -392,8 +1059,12 @@ fn yield_sold_transaction(
 
 /// Recognize whether PDF document is of Brokerage Statement type (old e-trade type of PDF
 /// document) or maybe Single account statment (newer e-trade/morgan stanley type of document)
-fn recognize_statement(page: PageRc) -> Result<StatementType, String> {
+fn recognize_statement(page: PageRc, pdftoparse: &str) -> Result<StatementType, String> {
     log::info!("Starting to recognize PDF document type");
+    // Heuristic: Common clause in trade confirmations. Lead text varies based on whether there's single or multiple transactions in confirmation
+    let confirmation_clause_common = "confirmed in accordance with the information provided on the Conditions and Disclosures page";
+    let mut text_acc_raw = String::new();
+
     let contents = page
         .contents
         .as_ref()
@@ -414,11 +1085,23 @@ fn recognize_statement(page: PageRc) -> Result<StatementType, String> {
                             for e in c {
                                 if let Primitive::String(actual_string) = e {
                                     let raw_string = actual_string.clone().into_string();
-                                    let rust_string = if let Ok(r) = raw_string {
-                                        r.trim().to_uppercase()
+                                    let raw_trimmed = if let Ok(r) = raw_string {
+                                        r.trim().to_owned()
                                     } else {
                                         "".to_owned()
                                     };
+                                    let rust_string = raw_trimmed.to_uppercase();
+                                    if !rust_string.is_empty() {
+                                        if !text_acc_raw.is_empty() {
+                                            text_acc_raw.push(' ');
+                                        }
+                                        text_acc_raw.push_str(raw_trimmed.as_str());
+                                        if text_acc_raw.contains(confirmation_clause_common) {
+                                            statement_type = StatementType::TradeConfirmation;
+                                            log::info!("PDF parser recognized Trade Confirmation document by legal confirmation clause");
+                                            return Ok(());
+                                        }
+                                    }
                                     if rust_string.contains("ACCT:")  {
                                         statement_type = StatementType::BrokerageStatement;
                                         log::info!("PDF parser recognized Brokerage Statement document by finding: \"{rust_string}\"");
@@ -440,11 +1123,24 @@ fn recognize_statement(page: PageRc) -> Result<StatementType, String> {
                     match a {
                         Primitive::String(actual_string) => {
                             let raw_string = actual_string.clone().into_string();
-                            let rust_string = if let Ok(r) = raw_string {
-                                r.trim().to_uppercase()
+                            let raw_trimmed = if let Ok(r) = raw_string {
+                                r.trim().to_owned()
                             } else {
                                 "".to_owned()
                             };
+                            let rust_string = raw_trimmed.to_uppercase();
+
+                            if !rust_string.is_empty() {
+                                if !text_acc_raw.is_empty() {
+                                    text_acc_raw.push(' ');
+                                }
+                                text_acc_raw.push_str(raw_trimmed.as_str());
+                                if text_acc_raw.contains(confirmation_clause_common) {
+                                    statement_type = StatementType::TradeConfirmation;
+                                    log::info!("PDF parser recognized Trade Confirmation document by legal confirmation clause");
+                                    return Ok(());
+                                }
+                            }
 
                             if rust_string == "CLIENT STATEMENT" {
                                 statement_type = StatementType::AccountStatement;
@@ -461,6 +1157,19 @@ fn recognize_statement(page: PageRc) -> Result<StatementType, String> {
         }
         Ok::<(),String>(())
     })?;
+
+    if statement_type == StatementType::UnknownDocument {
+        if let Ok(extracted_text) = extract_text_with_lopdf(pdftoparse) {
+            if extracted_text.contains(confirmation_clause_common) {
+                log::info!("PDF parser recognized Trade Confirmation document by legal confirmation clause (lopdf fallback)");
+                return Ok(StatementType::TradeConfirmation);
+            }
+            if extracted_text.to_uppercase().contains("CLIENT STATEMENT") {
+                log::info!("PDF parser recognized Account Statement document by finding CLIENT STATEMENT (lopdf fallback)");
+                return Ok(StatementType::AccountStatement);
+            }
+        }
+    }
 
     Ok(statement_type)
 }
@@ -695,7 +1404,7 @@ fn parse_account_statement<'a, I>(
         Vec<(String, f32, f32)>,
         Vec<(String, f32, f32, Option<String>)>,
         Vec<(String, String, f32, f32, f32, Option<String>)>,
-        Vec<(String, String, i32, f32, f32, f32, f32, f32)>,
+        Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
 >
@@ -705,10 +1414,9 @@ where
     let mut interests_transactions: Vec<(String, f32, f32)> = vec![];
     let mut div_transactions: Vec<(String, f32, f32, Option<String>)> = vec![];
     let mut sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
-    let trades: Vec<(String, String, i32, f32, f32, f32, f32, f32)> = vec![];
+    let trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
     let mut state = ParserState::SearchingYear;
-    let mut sequence: std::collections::VecDeque<Box<dyn Entry>> =
-        std::collections::VecDeque::new();
+    let mut sequence: VecDeque<Box<dyn Entry>> = VecDeque::new();
     let mut processed_sequence: Vec<Box<dyn Entry>> = vec![];
     // Queue for transaction dates. Pop last one or last two as trade and settlement dates
     let mut transaction_dates: Vec<String> = vec![];
@@ -813,14 +1521,15 @@ where
 ///        transaction date, gross_us, tax_us, company
 ///  Sold stock transaction is :
 ///     (trade_date, settlement_date, quantity, price, amount_sold, company)
-pub fn parse_statement(
+pub(crate) fn parse_statement_with_seen_pages(
     pdftoparse: &str,
+    seen_multi_transaction_page_hashes: &mut HashSet<u64>,
 ) -> Result<
     (
         Vec<(String, f32, f32)>,
         Vec<(String, f32, f32, Option<String>)>,
         Vec<(String, String, f32, f32, f32, Option<String>)>,
-        Vec<(String, String, i32, f32, f32, f32, f32, f32)>,
+        Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
     ),
     String,
 > {
@@ -837,7 +1546,7 @@ pub fn parse_statement(
         .unwrap()
         .map_err(|_| "Unable to get first page of PDF file".to_string())?;
 
-    let document_type = recognize_statement(first_page)?;
+    let document_type = recognize_statement(first_page.clone(), pdftoparse)?;
 
     let (interests_transactions, div_transactions, sold_transactions, trades) = match document_type
     {
@@ -853,6 +1562,23 @@ pub fn parse_statement(
             log::info!("Processing Account statement PDF");
             parse_account_statement(pdffile_iter)?
         }
+        StatementType::TradeConfirmation => {
+            log::info!("Processing Trade Confirmation PDF");
+            match parse_trade_confirmation_lopdf(pdftoparse, seen_multi_transaction_page_hashes) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    log::warn!("Low-level trade confirmation parser failed ({e}). Falling back to legacy parser");
+                    parse_trade_confirmation(first_page, pdffile_iter)
+                        .map_err(|legacy_err| {
+                            format!(
+                                "{} [file: {}]",
+                                legacy_err,
+                                pdftoparse
+                            )
+                        })?
+                }
+            }
+        }
     };
 
     Ok((
@@ -861,6 +1587,21 @@ pub fn parse_statement(
         sold_transactions,
         trades,
     ))
+}
+
+pub fn parse_statement(
+    pdftoparse: &str,
+) -> Result<
+    (
+        Vec<(String, f32, f32)>,
+        Vec<(String, f32, f32, Option<String>)>,
+        Vec<(String, String, f32, f32, f32, Option<String>)>,
+        Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)>,
+    ),
+    String,
+> {
+    let mut seen_multi_transaction_page_hashes = HashSet::new();
+    parse_statement_with_seen_pages(pdftoparse, &mut seen_multi_transaction_page_hashes)
 }
 
 #[cfg(test)]
@@ -927,6 +1668,133 @@ mod tests {
         };
         s.parse(&pdf::primitive::PdfString::new(data));
         assert_eq!(s.is_pattern(), true);
+        Ok(())
+    }
+
+    #[test]
+    fn test_trade_confirmation_transaction_extraction() -> Result<(), String> {
+        let tokens = vec![
+            "12/02/25",
+            "12/05/25",
+            "1234",
+            "5678",
+            "INTC",
+            "SELL",
+            "82",
+            "$",
+            "28.2035",
+            "PRINCIPAL",
+            "$",
+            "2312.69",
+            "COMMISSION",
+            "$",
+            "0.00",
+            "FEE",
+            "$",
+            "1.22",
+            "NET",
+            "AMOUNT",
+            "$",
+            "2311.47",
+        ];
+
+        let mut sequence: std::collections::VecDeque<Box<dyn Entry>> =
+            std::collections::VecDeque::new();
+        create_trade_parsing_sequence(&mut sequence);
+        let mut processed_sequence: Vec<Box<dyn Entry>> = vec![];
+        let mut trades: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
+
+        for token in tokens {
+            let data: Vec<u8> = token.as_bytes().to_vec();
+            process_trade_confirmation_transaction(
+                &pdf::primitive::PdfString::new(data),
+                &mut processed_sequence,
+                &mut sequence,
+                &mut trades,
+            )?;
+        }
+
+        assert_eq!(trades.len(), 1);
+        assert_eq!(
+            trades[0],
+            (
+                "12/02/25".to_owned(),
+                "12/05/25".to_owned(),
+                82,
+                Decimal::from_str("28.2035").unwrap(),
+                Decimal::from_str("2312.69").unwrap(),
+                Decimal::ZERO,
+                Decimal::from_str("1.22").unwrap(),
+                Decimal::from_str("2311.47").unwrap(),
+            )
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_skip_duplicate_multi_transaction_page_by_hash() -> Result<(), String> {
+        let duplicated_multi_transaction_page = "
+            12/02/2025 12/05/2025 82 28.2035 Transaction Type: Sold
+            Principal $2312.69 Commission $0.00 Transaction Fee $1.22 Net Amount $2311.47
+            12/02/2025 12/05/2025 41 28.0000 Transaction Type: Sold
+            Principal $1148.00 Commission $0.00 Transaction Fee $0.50 Net Amount $1147.50
+        ";
+
+        let parsed_once = parse_trade_confirmation_from_text(duplicated_multi_transaction_page)?;
+        assert_eq!(parsed_once.len(), 2);
+
+        let mut seen_hashes = HashSet::new();
+
+        let first_time_skipped = should_skip_duplicate_multi_transaction_page(
+            duplicated_multi_transaction_page,
+            parsed_once.len(),
+            &mut seen_hashes,
+        );
+        assert_eq!(first_time_skipped, false);
+
+        let parsed_twice = parse_trade_confirmation_from_text(duplicated_multi_transaction_page)?;
+        assert_eq!(parsed_twice.len(), 2);
+
+        let second_time_skipped = should_skip_duplicate_multi_transaction_page(
+            duplicated_multi_transaction_page,
+            parsed_twice.len(),
+            &mut seen_hashes,
+        );
+        assert_eq!(second_time_skipped, true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_do_not_skip_duplicate_single_transaction_page_by_hash() -> Result<(), String> {
+        let duplicated_single_transaction_page = "
+            12/02/2025 12/05/2025 82 28.2035 Transaction Type: Sold
+            Principal $2312.69 Commission $0.00 Transaction Fee $1.22 Net Amount $2311.47
+        ";
+
+        let parsed_once = parse_trade_confirmation_from_text(duplicated_single_transaction_page)?;
+        assert_eq!(parsed_once.len(), 1);
+
+        let mut seen_hashes = HashSet::new();
+
+        let first_time_skipped = should_skip_duplicate_multi_transaction_page(
+            duplicated_single_transaction_page,
+            parsed_once.len(),
+            &mut seen_hashes,
+        );
+        assert_eq!(first_time_skipped, false);
+
+        let parsed_twice = parse_trade_confirmation_from_text(duplicated_single_transaction_page)?;
+        assert_eq!(parsed_twice.len(), 1);
+
+        let second_time_skipped = should_skip_duplicate_multi_transaction_page(
+            duplicated_single_transaction_page,
+            parsed_twice.len(),
+            &mut seen_hashes,
+        );
+        assert_eq!(second_time_skipped, false);
+
         Ok(())
     }
 
@@ -1062,7 +1930,7 @@ mod tests {
             .unwrap()
             .map_err(|_| "Unable to get first page of PDF file".to_string())?;
 
-        let document_type = recognize_statement(first_page)?;
+        let document_type = recognize_statement(first_page, pdftoparse)?;
 
         assert_eq!(document_type, StatementType::AccountStatement);
 
@@ -1085,7 +1953,7 @@ mod tests {
             .unwrap()
             .map_err(|_| "Unable to get first page of PDF file".to_string())?;
 
-        let document_type = recognize_statement(first_page)?;
+        let document_type = recognize_statement(first_page, pdftoparse)?;
 
         assert_eq!(document_type, StatementType::BrokerageStatement);
 
@@ -1107,7 +1975,7 @@ mod tests {
             .unwrap()
             .map_err(|_| "Unable to get first page of PDF file".to_string())?;
 
-        let document_type = recognize_statement(first_page)?;
+        let document_type = recognize_statement(first_page, pdftoparse)?;
 
         assert_eq!(document_type, StatementType::UnknownDocument);
 

@@ -12,9 +12,10 @@ pub use crate::logging::ResultExt;
 /// aqusition cost of sold stock (aquisition_cost)
 /// adjusted aquisition cost of sold stock (cost_basis)
 /// income from sold stock (total_proceeds)
+/// quantity sold (quantity)
 pub fn parse_gains_and_losses(
     xlsxtoparse: &str,
-) -> Result<Vec<(String, String, f32, f32, f32)>, &str> {
+) -> Result<Vec<(String, String, f32, f32, f32, f32)>, &str> {
     let mut excel: Xlsx<_> =
         open_workbook(xlsxtoparse).map_err(|_| "Error opening XLSX file: {}")?;
     let name = excel
@@ -23,7 +24,7 @@ pub fn parse_gains_and_losses(
         .expect_and_log("No worksheet found")
         .clone();
     log::info!("name: {}", name);
-    let mut transactions: Vec<(String, String, f32, f32, f32)> = vec![];
+    let mut transactions: Vec<(String, String, f32, f32, f32, f32)> = vec![];
     if let Some(Ok(r)) = excel.worksheet_range(&name) {
         let mut rows = r.rows();
         let categories = rows
@@ -34,6 +35,7 @@ pub fn parse_gains_and_losses(
         let mut cost_basis_idx = 0;
         let mut acquistion_cost_idx = 0;
         let mut total_proceeds_idx = 0;
+        let mut quantity_idx: Option<usize> = None;
 
         let mut idx = 0;
         for c in categories {
@@ -45,6 +47,7 @@ pub fn parse_gains_and_losses(
                     "Acquisition Cost" | "Koszt zakupu" => acquistion_cost_idx = idx,
                     "Adjusted Cost Basis" | "Skorygowana podstawa kosztów" => cost_basis_idx = idx,
                     "Total Proceeds" | "Łączne wpływy" => total_proceeds_idx = idx,
+                    "Quantity" | "Liczba" | "Ilość" => quantity_idx = Some(idx),
                     _ => (),
                 }
             }
@@ -58,12 +61,16 @@ pub fn parse_gains_and_losses(
         // Iterate through rows of actual sold transactions
         for transakcja in rows {
             log::info!(
-                "G&L ACQUIRED_DATE: {} SOLD_DATE: {} ACQUISTION_COST: {} COST_BASIS: {} TOTAL: {}",
+                "G&L ACQUIRED_DATE: {} SOLD_DATE: {} ACQUISTION_COST: {} COST_BASIS: {} TOTAL: {} QTY: {}",
                 transakcja[date_acquired_idx],
                 transakcja[date_sold_idx],
                 transakcja[acquistion_cost_idx],
                 transakcja[cost_basis_idx],
-                transakcja[total_proceeds_idx]
+                transakcja[total_proceeds_idx],
+                quantity_idx
+                    .and_then(|i| transakcja.get(i))
+                    .and_then(|c| c.get_float())
+                    .unwrap_or(0.0)
             );
             // If row is ill formed or emtpy then it means user added something and this is to be
             // dropped
@@ -89,6 +96,10 @@ pub fn parse_gains_and_losses(
                 transakcja[acquistion_cost_idx].get_float().unwrap() as f32,
                 transakcja[cost_basis_idx].get_float().unwrap() as f32,
                 transakcja[total_proceeds_idx].get_float().unwrap() as f32,
+                quantity_idx
+                    .and_then(|i| transakcja.get(i))
+                    .and_then(|c| c.get_float())
+                    .unwrap_or(0.0) as f32,
             ));
         }
     }
@@ -100,11 +111,21 @@ pub fn parse_gains_and_losses(
 mod tests {
     use super::*;
 
+    fn strip_qty(
+        rows: Vec<(String, String, f32, f32, f32, f32)>,
+    ) -> Vec<(String, String, f32, f32, f32)> {
+        rows.into_iter()
+            .map(|(a, b, c, d, e, _)| (a, b, c, d, e))
+            .collect()
+    }
+
     #[test]
     fn test_parse_gain_and_losses() -> Result<(), String> {
+        let collapsed = parse_gains_and_losses("data/G&L_Collapsed.xlsx")?;
+        assert!(collapsed.iter().all(|(_, _, _, _, _, qty)| *qty >= 0.0));
         assert_eq!(
-            parse_gains_and_losses("data/G&L_Collapsed.xlsx"),
-            Ok(vec![
+            strip_qty(collapsed),
+            vec![
                 (
                     "04/24/2013".to_owned(),
                     "04/11/2022".to_owned(),
@@ -119,11 +140,14 @@ mod tests {
                     29.28195,
                     43.67
                 )
-            ])
+            ]
         );
+
+        let expanded = parse_gains_and_losses("data/G&L_Expanded.xlsx")?;
+        assert!(expanded.iter().all(|(_, _, _, _, _, qty)| *qty >= 0.0));
         assert_eq!(
-            parse_gains_and_losses("data/G&L_Expanded.xlsx"),
-            Ok(vec![
+            strip_qty(expanded),
+            vec![
                 (
                     "04/24/2013".to_owned(),
                     "04/11/2022".to_owned(),
@@ -138,7 +162,7 @@ mod tests {
                     29.28195,
                     43.67
                 )
-            ])
+            ]
         );
 
         Ok(())
@@ -146,9 +170,11 @@ mod tests {
 
     #[test]
     fn test_parse_gain_and_losses_pl() -> Result<(), String> {
+        let parsed = parse_gains_and_losses("data/G&L_Expanded_polish.xlsx")?;
+        assert!(parsed.iter().all(|(_, _, _, _, _, qty)| *qty >= 0.0));
         assert_eq!(
-            parse_gains_and_losses("data/G&L_Expanded_polish.xlsx"),
-            Ok(vec![
+            strip_qty(parsed),
+            vec![
                 (
                     "02/17/2023".to_owned(),
                     "02/21/2023".to_owned(),
@@ -219,7 +245,7 @@ mod tests {
                     252.665,
                     307.82
                 )
-            ])
+            ]
         );
         Ok(())
     }

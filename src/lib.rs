@@ -4,9 +4,11 @@
 mod csvparser;
 mod ecb;
 mod logging;
-mod pdfparser;
+pub mod pdfparser;
 mod transactions;
 mod xlsxparser;
+
+use rust_decimal::Decimal;
 
 type ReqwestClient = reqwest::blocking::Client;
 
@@ -111,8 +113,9 @@ pub struct SoldTransaction {
     pub trade_date: String,
     pub settlement_date: String,
     pub acquisition_date: String,
-    pub income_us: f32,
+    pub income_us: f32,  // net proceeds (what seller receives, excluding fees)
     pub cost_basis: f32,
+    pub fees: f32,       // fees amount (0 if no trade confirmations)
     pub exchange_rate_trade_date: String, // T-1 (working day preceding trade date)
     pub exchange_rate_trade: f32,
     pub exchange_rate_acquisition_date: String, // A-1 (working day preceding acquisition date)
@@ -124,12 +127,19 @@ pub struct SoldTransaction {
 
 impl SoldTransaction {
     pub fn format_to_print(&self, prefix: &str) -> String {
+        let (income_label, fees_str) = if self.fees > 0.0 {
+            // When fees are present, we have trade confirmations: show net + fees
+            ("net_proceeds", format!(" + ${:.2} fees", self.fees))
+        } else {
+            // When no fees, we have no trade confirmations: income_us is net from Account Statements
+            ("net_proceeds", String::new())
+        };
         format!(
-                "{prefix} SOLD TRANSACTION trade_date: {}, settlement_date: {}, acquisition_date: {}, net_income: ${},  cost_basis: {}, exchange_rate_trade: {} , exchange_rate_trade_date: {}, exchange_rate_acquisition: {} , exchange_rate_acquisition_date: {}",
+                "{prefix} SOLD TRANSACTION trade_date: {}, settlement_date: {}, acquisition_date: {}, {}: ${}{},  cost_basis: {}, exchange_rate_trade: {} , exchange_rate_trade_date: {}, exchange_rate_acquisition: {} , exchange_rate_acquisition_date: {}",
                 chrono::NaiveDate::parse_from_str(&self.trade_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
                 chrono::NaiveDate::parse_from_str(&self.settlement_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
                 chrono::NaiveDate::parse_from_str(&self.acquisition_date, "%m/%d/%y").unwrap().format("%Y-%m-%d"), 
-                &self.income_us, &self.cost_basis, &self.exchange_rate_trade, &self.exchange_rate_trade_date, &self.exchange_rate_acquisition, &self.exchange_rate_acquisition_date,
+                income_label, &self.income_us, &fees_str, &self.cost_basis, &self.exchange_rate_trade, &self.exchange_rate_trade_date, &self.exchange_rate_acquisition, &self.exchange_rate_acquisition_date,
             )
             .to_owned()
     }
@@ -265,6 +275,7 @@ pub struct TaxCalculationResult {
     pub revolut_dividends_transactions: Vec<Transaction>,
     pub sold_transactions: Vec<SoldTransaction>,
     pub revolut_sold_transactions: Vec<SoldTransaction>,
+    pub missing_trade_confirmations_warning: Option<String>,
 }
 
 fn create_client() -> reqwest::blocking::Client {
@@ -382,7 +393,8 @@ pub fn run_taxation(
     let mut parsed_interests_transactions: Vec<(String, f32, f32)> = vec![];
     let mut parsed_div_transactions: Vec<(String, f32, f32, Option<String>)> = vec![];
     let mut parsed_sold_transactions: Vec<(String, String, f32, f32, f32, Option<String>)> = vec![];
-    let mut parsed_gain_and_losses: Vec<(String, String, f32, f32, f32)> = vec![];
+    let mut parsed_gain_and_losses: Vec<(String, String, f32, f32, f32, f32)> = vec![];
+    let mut parsed_sell_trade_confirmations: Vec<(String, String, i32, Decimal, Decimal, Decimal, Decimal, Decimal)> = vec![];
     let mut parsed_revolut_dividends_transactions: Vec<(
         String,
         Currency,
@@ -396,16 +408,22 @@ pub fn run_taxation(
         Currency,
         Option<String>,
     )> = vec![];
+    let mut seen_multi_transaction_trade_confirmation_pages: HashSet<u64> = HashSet::new();
 
     // 1. Parse PDF,XLSX and CSV documents to get list of transactions
     names.iter().try_for_each(|x| {
         // If name contains .pdf then parse as pdf
         // if name contains .xlsx then parse as spreadsheet
         if x.contains(".pdf") {
-            let (mut int_t, mut div_t, mut sold_t, _) = pdfparser::parse_statement(x)?;
+            let (mut int_t, mut div_t, mut sold_t, mut trades_t) =
+                pdfparser::parse_statement_with_seen_pages(
+                    x,
+                    &mut seen_multi_transaction_trade_confirmation_pages,
+                )?;
             parsed_interests_transactions.append(&mut int_t);
             parsed_div_transactions.append(&mut div_t);
             parsed_sold_transactions.append(&mut sold_t);
+            parsed_sell_trade_confirmations.append(&mut trades_t);
         } else if x.contains(".xlsx") {
             parsed_gain_and_losses.append(&mut xlsxparser::parse_gains_and_losses(x)?);
         } else if x.contains(".csv") {
@@ -436,8 +454,8 @@ pub fn run_taxation(
     }
 
     // 3. Verify and create full sold transactions info needed for TAX purposes
-    let detailed_sold_transactions =
-        reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gain_and_losses)?;
+    let (detailed_sold_transactions, missing_tc_warning) =
+        reconstruct_sold_transactions(&parsed_sold_transactions, &parsed_gain_and_losses, &parsed_sell_trade_confirmations)?;
 
     // 4. Get Exchange rates
     // Gather all trade , settlement and transaction dates into hash map to be passed to
@@ -462,7 +480,7 @@ pub fn run_taxation(
             }
         });
     detailed_sold_transactions.iter().for_each(
-        |(trade_date, _settlement_date, acquisition_date, _, _, _)| {
+        |(trade_date, _settlement_date, acquisition_date, _, _, _, _)| {
             // No need to get exchange rate for settlement date as it has no tax implications
             let ex = Exchange::USD(trade_date.clone());
             if dates.contains_key(&ex) == false {
@@ -533,6 +551,7 @@ pub fn run_taxation(
         revolut_dividends_transactions: revolut_dividends_transactions,
         sold_transactions: sold_transactions,
         revolut_sold_transactions: revolut_sold_transactions,
+        missing_trade_confirmations_warning: missing_tc_warning,
     })
 }
 
@@ -705,6 +724,7 @@ mod tests {
             acquisition_date: "N/A".to_string(),
             income_us: 100.0,
             cost_basis: 70.0,
+            fees: 0.0,
             exchange_rate_trade_date: "N/A".to_string(),
             exchange_rate_trade: 5.0,
             exchange_rate_acquisition_date: "N/A".to_string(),
@@ -728,6 +748,7 @@ mod tests {
                 acquisition_date: "N/A".to_string(),
                 income_us: 100.0,
                 cost_basis: 70.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "N/A".to_string(),
                 exchange_rate_trade: 5.0,
                 exchange_rate_acquisition_date: "N/A".to_string(),
@@ -740,6 +761,7 @@ mod tests {
                 acquisition_date: "N/A".to_string(),
                 income_us: 10.0,
                 cost_basis: 4.0,
+                fees: 0.0,
                 exchange_rate_trade_date: "N/A".to_string(),
                 exchange_rate_trade: 2.0,
                 exchange_rate_acquisition_date: "N/A".to_string(),
